@@ -107,6 +107,8 @@ func _ready() -> void:
 func _button(parent: Control, text: String, action: Callable) -> void:
 	var b := Button.new()
 	b.text = text
+	# On a touch screen a quick tap can press and release in one frame; act on the press.
+	b.action_mode = BaseButton.ACTION_MODE_BUTTON_PRESS
 	b.pressed.connect(action)
 	parent.add_child(b)
 
