@@ -28,6 +28,9 @@ func _init() -> void:
 	test_bounds_bounce()
 	test_input_frozen_while_dashing()
 	test_real_maps_load()
+	test_sound_distance_and_pan()
+	test_clock_digits()
+	test_boost_sound_trigger()
 	print("\n%d passed, %d failed" % [passed, failures])
 	quit(1 if failures > 0 else 0)
 
@@ -334,3 +337,40 @@ func test_real_maps_load() -> void:
 		for sp in m.spawns:
 			inside = inside and m.in_bounds(sp) and m.collision.sphere_contact(sp, 13.5).is_empty()
 		check(m.spawns.size() == 12 and inside, "%s: 12 start points, all inside the bounds and clear of walls" % m.title)
+
+# --- Sound and HUD --------------------------------------------------------------------------
+
+func test_sound_distance_and_pan() -> void:
+	print("sound (NubAudiere::get_volume, get_pan)")
+	check(near(GameSound.volume_at(Vector2.ZERO, Vector2.ZERO), 0.625, 0.001), "right under the camera: 1 - 300 / 800 = 0.625")
+	check(near(GameSound.volume_at(Vector2.ZERO, Vector2(400, 0)), 0.375, 0.001), "400 away: 1 - 500 / 800 = 0.375")
+	check(GameSound.volume_at(Vector2.ZERO, Vector2(800, 0)) == 0.0, "silent by about 740 away")
+	check(GameSound.pan_at(Vector2.ZERO, Vector2(40, 0)) == 0.0, "no pan within 50 units sideways")
+	check(near(GameSound.pan_at(Vector2.ZERO, Vector2(100, 0)), 0.5) and GameSound.pan_at(Vector2.ZERO, Vector2(-500, 0)) == -1.0, "x 0.005 per unit, clamped")
+
+func test_clock_digits() -> void:
+	print("clock (OnTimeUpdate)")
+	check(Hud.time_digits(83.5) == [0, 1, 2, 3, 1, 0], "83.5 s reads 01:23 then 1, 0 (835 mod 6)")
+	check(Hud.time_digits(1.68) == [0, 0, 0, 1, 4, 8], "the tens-of-hundredths digit wraps at 6, as in the script (1.68 s shows 01:48)")
+
+func test_boost_sound_trigger() -> void:
+	print("boost sound (on_booster)")
+	var sim := MechSim.new()
+	var count := [0]
+	sim.boost_started.connect(func() -> void: count[0] += 1)
+	var it := MechSim.Intent.new()
+	it.right = true
+	run(sim, it, 0.1)
+	it.boost = true
+	run(sim, it, 0.5)
+	check(count[0] == 1, "the owner hears it once when a boost starts (%d)" % count[0])
+	var remote := MechSim.new()
+	var heard := [0]
+	remote.boost_started.connect(func() -> void: heard[0] += 1)
+	remote.apply_snapshot(sim.snapshot())
+	remote.apply_snapshot(sim.snapshot())
+	var turned := sim.snapshot()
+	turned[3] = 0.0
+	turned[4] = 1.0
+	remote.apply_snapshot(turned)
+	check(heard[0] == 1, "another player hears it for each new boosting move, not every packet (%d)" % heard[0])

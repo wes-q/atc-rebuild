@@ -13,6 +13,10 @@ const MAP_BASIS := Basis(Vector3(0.3, 0, 0), Vector3(0, -0.3, 0), Vector3(0, 0, 
 static var _hit_scene: PackedScene
 static var _explosion_scene: PackedScene
 static var _wall_crash_scene: PackedScene
+static var _fonts := {}
+const FONT_HIT := "res://assets/original/fx/font_hit.gltf"
+const FONT_DAMAGE := "res://assets/original/fx/font_damage.gltf"
+const FONT_TIME := 1.0 ## the particles' 1 s life (energy)
 
 ## Environment, light and camera. The arena comes from build_map.
 static func build(root: Node3D, depth: float) -> Dictionary:
@@ -129,6 +133,29 @@ static func frame_flags(frame_name: String) -> Array[String]:
 
 static func place_sky(sky: Node3D, camera: Camera3D) -> void:
 	sky.global_transform = Transform3D(MechView.G * Basis.from_scale(Vector3(1, 1, -1) * SKY_SCALE), camera.position)
+
+## Damage::put_image_only: weapon/font_hit.x (your shot landed) or font_damage.x (you were
+## hit), placed with an identity matrix, so no scale and no rotation beyond the axis mapping.
+static func font_marker(root: Node3D, at: Vector2, hit: bool) -> void:
+	var path := FONT_HIT if hit else FONT_DAMAGE
+	if not _fonts.has(path):
+		_fonts[path] = load(path)
+	var fx := (_fonts[path] as PackedScene).instantiate() as Node3D
+	root.add_child(fx)
+	fx.transform = Transform3D(MechView.G * Basis.from_scale(Vector3(1, 1, -1)), Original.to_godot(at))
+	MechView.play_effect(fx, false)
+	# The visible part is the particle script named by the "p:" frame, riding on that frame.
+	# The burst (fonts_01) is drawn under the text (inferred: the layering is not traced).
+	var anchor: Node3D = fx
+	for n in fx.find_children("p*", "Node3D", true, false):
+		anchor = n
+		break
+	var script_name := "font_hit" if hit else "font_damage"
+	var layers := ParticleQuad.layers(script_name)
+	for i in layers.size():
+		anchor.add_child(ParticleQuad.from_layer(layers[i], layers.size() - i))
+	var timer := fx.get_tree().create_timer(FONT_TIME)
+	timer.timeout.connect(fx.queue_free)
 
 ## rc_map::crashed_with_wall: weapon/wall_crash.x launched from the edge point, facing out
 ## along the wall normal with up toward the camera.

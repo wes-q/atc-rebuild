@@ -27,6 +27,9 @@ signal fired(origin: Vector2, deg: int)
 signal exploded
 ## Pushed back off the arena edge (rc_map::crashed_with_wall), for the wall_crash effect.
 signal wall_crashed(point: Vector2, normal: Vector2)
+## rcPlayerManager::on_booster, for the sp_booster sound. The owner's client calls it when a
+## boost starts; other clients call it for every boosting move message they receive.
+signal boost_started
 
 # Stats from the original database, via GameData.
 var stats: GameData.Robot
@@ -189,6 +192,7 @@ func _update_move(intent: Intent) -> void:
 				return
 			if booster_gage > energy_low_line:
 				_send_move(_deg(intent), by_speed)
+				boost_started.emit()
 			else:
 				booster_warning_time = 1.5
 			return
@@ -380,7 +384,11 @@ func snapshot() -> Array:
 func apply_snapshot(s: Array) -> void:
 	real_pos = Vector2(s[0], s[1])
 	facing = int(s[2])
-	move_dir = Vector2(s[3], s[4])
+	var new_dir := Vector2(s[3], s[4])
+	# A new boosting move message: the boost started or changed direction.
+	if int(s[7]) == 2 and (speed_state != 2 or not new_dir.is_equal_approx(move_dir)) and _has_snapshot:
+		boost_started.emit()
+	move_dir = new_dir
 	_last_vel = float(s[5])
 	acc_flag = int(s[6]) != 0
 	speed_state = int(s[7])

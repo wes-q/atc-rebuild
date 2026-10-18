@@ -32,6 +32,30 @@ ASSETS = [
     ("anim/zeid_damage02.x", "zeid/zeid_damage02"),
     ("anim/explo2_result.X", "fx/explo2_result"),
     ("weapon/wall_crash.X", "fx/wall_crash"),
+    ("weapon/font_hit.X", "fx/font_hit"),
+    ("weapon/font_damage.X", "fx/font_damage"),
+]
+
+# Battle sounds, named as the code plays them (NubAudiere::play adds ".ogg"). Relative to bin/.
+SOUNDS = [
+    "sound/gunfire1",              # SR-3 sound_file[2]: each bullet (on_create_bullet)
+    "sound/gun_Hit",               # SR-3 sound_file[1]: at the mech that was hit
+    "sound/gun_start",             # SR-3 sound_file[0]: weapon change
+    "sound/sp_booster",            # on_booster: a boost starts
+    "sound/special_fire",          # rc_map::crashed_with_wall
+    "sound/common/bomb-complete",  # on_robot_explosion
+]
+
+# BGM::load play list in index order. A match plays rand() % 19; 19 is victory, 23 defeat.
+# Entries 10 and 11 name a BGM/BGM folder that does not exist, so the original played nothing.
+BGM_LIST = [
+    "BGM/BG2.ogg", "BGM/silver.ogg", "BGM/BGM.ogg", "BGM/edit2.ogg", "BGM/edit1.ogg",
+    "BGM/07-Whirlwind Struggle(Inst)-[CRASH].ogg", "BGM/Raycrash_bgm.ogg", "BGM/violence(BAD MAN).ogg",
+    "BGM/05-Turn To Dust (Inst)-[CRASH].ogg", "BGM/09-Aux no.1-[CRASH].ogg", "BGM/BGM/BG1.ogg",
+    "BGM/BGM/BG3.ogg", "BGM/Dive into the blue - [Captoon].ogg", "BGM/05-Turn To Dust (Inst)-[CRASH].ogg",
+    "BGM/07-Whirlwind Struggle(Inst)-[CRASH].ogg", "BGM/BG1.ogg", "BGM/BG2.ogg", "BGM/BG3.ogg", "BGM/BG4.ogg",
+    "BGM/victory.ogg", "BGM/tutorial_bgm.ogg", "BGM/captoon.ogg", "BGM/About To Crash - [Extended Ver5-slow].ogg",
+    "BGM/defeat.ogg",
 ]
 
 IMAGE_TYPES = {".png", ".jpg", ".jpeg"}
@@ -374,12 +398,36 @@ def convert_maps(data_dir: pathlib.Path, out_dir: pathlib.Path) -> None:
     (out_dir / "map" / "maps.json").write_text(json.dumps(index, indent=1), encoding="utf-8")
 
 
+def copy_audio(bin_dir: pathlib.Path, out_dir: pathlib.Path) -> None:
+    for rel in SOUNDS:
+        name = rel if rel.lower().endswith(".ogg") else rel + ".ogg"
+        src = find_case_insensitive(bin_dir, name)
+        dst = out_dir / name.lower()
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, dst)
+    names: list[str | None] = []
+    for rel in BGM_LIST:
+        try:
+            src = find_case_insensitive(bin_dir, rel)
+        except FileNotFoundError:
+            names.append(None)
+            continue
+        dst = out_dir / "bgm" / src.name
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if not dst.exists():
+            shutil.copyfile(src, dst)
+        names.append(src.name)
+    (out_dir / "bgm" / "bgm.json").write_text(json.dumps(names, ensure_ascii=False, indent=1), encoding="utf-8")
+    print(f"{len(SOUNDS)} sounds, {sum(n is not None for n in names)} of {len(names)} BGM entries")
+
+
 def main() -> None:
     data_dir = pathlib.Path(sys.argv[1]).resolve()
     out_dir = pathlib.Path(sys.argv[2]).resolve()
     for rel, name in ASSETS:
         convert(data_dir, out_dir, rel, name)
     convert_maps(data_dir, out_dir)
+    copy_audio(data_dir.parent, out_dir)
     for rel, name in TEXTURES:
         src = find_case_insensitive(data_dir, rel)
         (out_dir / name).parent.mkdir(parents=True, exist_ok=True)

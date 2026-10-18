@@ -53,6 +53,7 @@ var map_choice := "space"
 ## Start point index per slot this round (RayCrashServer::position_set: random, no repeats).
 var spawn_points: Array[int] = [0, 1]
 var hud: Hud
+var sound: GameSound
 var menu: StartMenu
 var mechs: Dictionary = {} ## id -> Mech
 var stats: Dictionary = {} ## id -> Stats
@@ -88,6 +89,9 @@ func _ready() -> void:
 	if map_arg != "":
 		map_choice = map_arg
 	hud = Hud.new()
+	sound = GameSound.new()
+	add_child(sound)
+	sound.enabled = not OS.get_cmdline_user_args().has("mute")
 	add_child(hud)
 	multiplayer.peer_connected.connect(_on_peer_connected)
 	multiplayer.peer_disconnected.connect(_on_peer_disconnected)
@@ -228,6 +232,7 @@ func start_join(address: String) -> void:
 	_status = "Connecting to %s port %d..." % [address, PORT]
 
 func _reset_world() -> void:
+	sound.stop_bgm()
 	for id in mechs.keys():
 		_remove_mech(id)
 	_clear_bullets()
@@ -262,6 +267,10 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("ui_cancel") and mode != "":
 		_reset_world()
 		_show_menu("")
+	if event is InputEventKey and event.pressed and not event.echo and (event as InputEventKey).keycode == KEY_M:
+		sound.enabled = not sound.enabled
+		if not sound.enabled:
+			sound.stop_bgm()
 
 # --- Rounds -----------------------------------------------------------------------------
 
@@ -276,6 +285,8 @@ func _begin_round(number: int, map_id: String, spawns: Array[int]) -> void:
 	_next_round_timer = -1.0
 	_clear_bullets()
 	stats.clear()
+	# Each original match started a random track from the first 19 of the BGM list.
+	sound.play_battle_bgm()
 	for m: Mech in mechs.values():
 		m.sim.reset_at(_spawn_pos(m.slot), _spawn_facing(m.slot))
 		if _test_hp > 0:
@@ -347,6 +358,8 @@ func _show_result(winner: int, tally: Dictionary) -> void:
 		title = "YOU WIN"
 	elif winner != -999:
 		title = "YOU LOSE"
+	# Victory music for the winner, defeat for everyone else (NetManager).
+	sound.play_bgm(GameSound.BGM_VICTORY if winner == local_id else GameSound.BGM_DEFEAT)
 	var lines: Array[String] = []
 	for m: Mech in _mechs_in_slot_order():
 		var t: Array = tally.get(m.id, [0, 0])
@@ -360,6 +373,12 @@ func _mechs_in_slot_order() -> Array:
 	var list := mechs.values()
 	list.sort_custom(func(a: Mech, b: Mech) -> bool: return a.slot < b.slot)
 	return list
+
+## Name shown over a mech and in the HUD (the original showed account names).
+func _mech_name(m: Mech) -> String:
+	if m.id == DUMMY_ID:
+		return "Target"
+	return "Player %d" % (m.slot + 1)
 
 func _mech_label(m: Mech) -> String:
 	if m.id == DUMMY_ID:
@@ -437,12 +456,18 @@ func _spawn(id: int, slot: int, local: bool) -> void:
 	m.view.set_skin(slot)
 	for p in m.view.booster_points:
 		m.fx.append(BattleWorld.booster_flame(p))
+	m.sim.boost_started.connect(func() -> void: sound.play_at("sound/sp_booster", m.sim.pos))
 	if local:
 		m.sim.fired.connect(func(_o: Vector2, deg: int) -> void: _on_local_fired(m, deg))
-		m.sim.wall_crashed.connect(func(at: Vector2, normal: Vector2) -> void: BattleWorld.wall_crash(self, at, normal))
+		m.sim.wall_crashed.connect(func(at: Vector2, normal: Vector2) -> void: _on_wall_crash(m, at, normal))
 		cam_from = Vector3(m.sim.pos.x, -depth, m.sim.pos.y)
 	mechs[id] = m
 	stats[id] = Stats.new()
+
+## rc_map::crashed_with_wall: the wall_crash effect and sound/special_fire at your mech.
+func _on_wall_crash(m: Mech, at: Vector2, normal: Vector2) -> void:
+	BattleWorld.wall_crash(self, at, normal)
+	sound.play_at("sound/special_fire", m.sim.pos)
 
 func _remove_mech(id: int) -> void:
 	if mechs.has(id):
@@ -507,7 +532,13 @@ func _process(dt: float) -> void:
 	for m: Mech in mechs.values():
 		_draw_mech(m, dt)
 	var enemy := _nearest_enemy(me, false) if me else null
-	hud.refresh(me.sim if me else null, enemy.sim if enemy else null, depth, dt, _status, round_time)
+	var others := []
+	for m: Mech in mechs.values():
+		if m != me:
+			others.append([m.id, m.sim.pos, _mech_name(m), not m.sim.is_dead_complete])
+	var nearest := _nearest_enemy(me) if me else null
+	hud.refresh(me.sim if me else null, _mech_name(me) if me else "", _status, round_time, camera, others, nearest.id if nearest else 0, dt)
+	sound.listener = Vector2(cam_from.x, cam_from.z)
 	if _capture_dir != "":
 		_capture_time += dt
 		if _capture_time >= 1.0 / 30.0:
@@ -530,6 +561,7 @@ func _draw_mech(m: Mech, dt: float) -> void:
 		if not m.exploded:
 			m.exploded = true
 			BattleWorld.knockout_explosion(self, m.sim.pos)
+			sound.play_at("sound/common/bomb-complete", m.sim.pos)
 		m.view.visible = false
 		return
 	m.view.visible = true
@@ -586,6 +618,7 @@ func _on_local_fired(m: Mech, deg: int) -> void:
 		_net_fire.rpc(origin, deg)
 
 func _add_bullet(origin: Vector2, deg: int, shooter: Mech) -> void:
+	sound.play_at("sound/gunfire1", shooter.sim.pos)
 	var b := Bullet.new()
 	add_child(b)
 	b.setup(origin, deg, shooter.sim)
@@ -638,10 +671,17 @@ func _record_hit(victim_id: int, attacker_id: int, amount: int, remaining: int) 
 		victim.view.play_damage()
 	elif stats.has(attacker_id) and attacker_id != victim_id:
 		(stats[attacker_id] as Stats).kills += 1
+	# on_damage: the attacker's weapon hit sound at the mech that was hit.
+	sound.play_at("sound/gun_Hit", victim.sim.pos)
+	# World::process_damage: the marker goes 100 units up the plane from your own mech.
+	var me := _local()
+	if me == null:
+		return
 	if victim_id == local_id:
-		hud.show_marker(camera.unproject_position(Original.to_godot(victim.sim.pos)), "DAMAGE!")
+		BattleWorld.font_marker(self, me.sim.pos + Vector2(0, 100), false)
 	elif attacker_id == local_id:
-		hud.show_marker(camera.unproject_position(Original.to_godot(victim.sim.pos)), "HIT!")
+		BattleWorld.font_marker(self, me.sim.pos + Vector2(0, 100), true)
+		hud.show_target(Hud.ZEID_FACE, float(maxi(0, remaining)) / float(victim.sim.life_max), _mech_name(victim))
 
 # --- Camera -----------------------------------------------------------------------------
 

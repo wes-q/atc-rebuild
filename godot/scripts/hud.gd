@@ -1,79 +1,350 @@
 class_name Hud
 extends CanvasLayer
-## Placeholder readouts. The original HUD art comes in a later milestone.
+## The original battle HUD. page_game_fight:create() builds these dialogs from the original
+## window tables and art, and the update functions below are ports of the Lua ones the
+## client called every frame (OnBoosterUpdate, OnTimeUpdate, OnWeaponUpdate,
+## ON_self_user_state_wnd, ON_user_state_wnd). The radar dots, off-screen markers, name
+## tags and low-health warning were drawn by the C++ Radar class; those are ported in
+## _draw_overlay. Everything is laid out on the original 800x600 screen and scaled up.
+## The status line, controls line and results panel are this recreation's own.
 
-const GAUGE_W := 260.0
-const BAR_W := 210.0
+const SCREEN := Vector2(800, 600)
+## Radar::init
+const RADAR_POS := Vector2(680, 74)
+const RADAR_SCALE := 0.08
+const RADAR_HALF := Vector2(80, 60)
+const HOOD_CENTRE := Vector2(400, 300)
+const HOOD_RANGE := 180.0
+## Team 0 colour for names and markers (Radar::render_name). Every free-for-all player is team 0.
+const TEAM0_COLOR := Color8(93, 235, 136)
+const ZEID_FACE := 1 ## robot type 1
 
-var _gauge_fill: ColorRect
-var _gauge_label: Label
-var _low_line: ColorRect
-var _warning: Label
-var _info: Label
-var _hp_fill: ColorRect
-var _rifle_fill: ColorRect
-var _target_fill: ColorRect
-var _weapon_label: Label
-var _marker: Label
+## Another mech as the HUD needs it.
+class Tracked:
+	var id := 0
+	var pos := Vector2.ZERO
+	var name := ""
+	var alive := true
+	var hood_pos := Vector2.ZERO
+	var hood_set := false
+
+var screen: Control
+var booster: OriginalUI
+var playtime: OriginalUI
+var weapon: OriginalUI
+var self_state: OriginalUI
+var user_state: OriginalUI
+var focus: OriginalUI
+var radar: OriginalUI
+var overlay: Node2D
+
 var _status: Label
-var _clock: Label
+var _help: Label
 var _result: Control
 var _result_title: Label
 var _result_lines: Label
 var _result_footer: Label
-var _marker_time := 0.0
-var _blink := 0.0
+
+var _play_time_cs := 0.0
+var _user_state_time := 0.0
+var _spattack_alpha := 255.0
+var _tracked: Dictionary = {}
+var _me := Vector2.ZERO
+var _me_alive := false
+var _me_low := false
+var _camera: Camera3D
+var _nearest_id := 0
+var _weapons_set := false
 
 func _ready() -> void:
-	var panel := ColorRect.new()
-	panel.color = Color(0.05, 0.08, 0.14, 0.75)
-	panel.position = Vector2(16, 16)
-	panel.size = Vector2(300, 172)
-	add_child(panel)
+	screen = Control.new()
+	screen.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(screen)
+	if OriginalUI.available():
+		_build_original()
+	overlay = Node2D.new()
+	overlay.draw.connect(_draw_overlay)
+	screen.add_child(overlay)
 
-	_label("BOOSTER", Vector2(30, 24), 13, Color(0.6, 0.85, 1))
-	_bar(Vector2(30, 44), Vector2(GAUGE_W, 16), Color(0.1, 0.15, 0.25))
-	_gauge_fill = _bar(Vector2(30, 44), Vector2(GAUGE_W, 16), Color(0.3, 0.8, 1.0))
-	_low_line = _bar(Vector2.ZERO, Vector2(2, 20), Color(1, 0.45, 0.3))
-	_gauge_label = _label("", Vector2(30, 62), 12, Color(0.85, 0.9, 1))
-
-	_label("HP", Vector2(30, 86), 13, Color(0.55, 1.0, 0.6))
-	_bar(Vector2(80, 90), Vector2(BAR_W, 10), Color(0.1, 0.22, 0.12))
-	_hp_fill = _bar(Vector2(80, 90), Vector2(BAR_W, 10), Color(0.4, 0.95, 0.5))
-
-	_weapon_label = _label("WEAPON", Vector2(30, 108), 13, Color(0.6, 0.85, 1))
-	_bar(Vector2(80, 112), Vector2(BAR_W, 10), Color(0.1, 0.15, 0.25))
-	_rifle_fill = _bar(Vector2(80, 112), Vector2(BAR_W, 10), Color(1.0, 0.8, 0.35))
-
-	_label("ENEMY", Vector2(30, 130), 13, Color(1, 0.6, 0.55))
-	_bar(Vector2(80, 134), Vector2(BAR_W, 10), Color(0.25, 0.1, 0.1))
-	_target_fill = _bar(Vector2(80, 134), Vector2(BAR_W, 10), Color(1.0, 0.4, 0.35))
-	_info = _label("", Vector2(30, 154), 12, Color(0.7, 0.75, 0.85))
-
-	# World game_time, shown counting up as minutes, seconds and hundredths like the original.
-	_clock = _label("00:00:00", Vector2.ZERO, 24, Color(0.9, 0.95, 1))
-	_clock.set_anchors_and_offsets_preset(Control.PRESET_CENTER_TOP)
-	_clock.position = Vector2(_clock.position.x - 50, 14)
-
-	_warning = _label("BOOSTER LOW", Vector2.ZERO, 26, Color(1, 0.4, 0.3))
-	_warning.set_anchors_and_offsets_preset(Control.PRESET_CENTER_TOP)
-	_warning.position = Vector2(_warning.position.x - 80, 52)
-	_warning.visible = false
-
-	_marker = _label("HIT!", Vector2.ZERO, 30, Color(1, 0.85, 0.3))
-	_marker.visible = false
-
-	_status = _label("", Vector2.ZERO, 14, Color(0.95, 0.85, 0.5))
-	_status.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_LEFT)
-	_status.position = Vector2(16, _status.position.y - 48)
-
-	var help := _label(
-		"WASD or arrows: move    Mouse: aim    Left click: fire    Right click: boost    + / -: camera    Esc: menu",
-		Vector2.ZERO, 12, Color(0.65, 0.7, 0.8))
-	help.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_LEFT)
-	help.position = Vector2(16, help.position.y - 24)
-
+	_status = _label(14, Color(0.95, 0.85, 0.5))
+	_status.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_RIGHT)
+	_status.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	_status.position.y -= 44
+	_status.position.x -= 12
+	_help = _label(12, Color(0.65, 0.7, 0.8))
+	_help.text = "WASD: move   Mouse: aim   Left: fire   Right: boost   +/-: camera   M: sound   Esc: menu"
+	_help.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_RIGHT)
+	_help.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	_help.position.y -= 22
+	_help.position.x -= 12
 	_build_result()
+	get_viewport().size_changed.connect(_fit)
+	_fit()
+
+## page_game_fight:create()
+func _build_original() -> void:
+	focus = OriginalUI.create("res_dlg_game_fight_focus")
+	radar = OriginalUI.create("res_dlg_game_fight_reader_show_area")
+	weapon = OriginalUI.create("res_dlg_game_fight_weapon_dialog")
+	playtime = OriginalUI.create("res_dlg_game_fight_playtime")
+	booster = OriginalUI.create("res_dlg_game_fight_booster_base")
+	user_state = OriginalUI.create("res_dlg_game_fight_user_state")
+	self_state = OriginalUI.create("res_dlg_game_fight_self_user_state")
+	# Added in create()'s order, then sorted by order (weapon, user_state and focus are 0).
+	for d in [weapon, user_state, focus, self_state, radar, playtime, booster]:
+		screen.add_child(d)
+	user_state.visible = false
+	playtime.pos_set(334, 10)
+	# The C++ Radar draws the dots itself; the Lua slot windows stay hidden.
+	for team in ["ourteam", "enemy"]:
+		var group := radar.w(team)
+		if group:
+			for c in group.get_children():
+				c.visible = false
+	# item_slot_seleted_all_hide(), then the weapon panel for the SR-3 in the second slot.
+	for i in range(1, 7):
+		_hide(weapon.w("item_slot_%d_img_selete" % i))
+
+func _fit() -> void:
+	var k := get_viewport().get_visible_rect().size / SCREEN
+	var s := minf(k.x, k.y)
+	screen.scale = Vector2(s, s)
+	screen.position = (get_viewport().get_visible_rect().size - SCREEN * s) * 0.5
+
+func _label(size: int, color: Color) -> Label:
+	var l := Label.new()
+	l.add_theme_font_size_override("font_size", size)
+	l.add_theme_color_override("font_color", color)
+	l.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.8))
+	l.add_theme_constant_override("outline_size", 3)
+	add_child(l)
+	return l
+
+static func _hide(win: OriginalUI) -> void:
+	if win:
+		win.visible = false
+
+# --- Per frame --------------------------------------------------------------------------
+
+## Everything the HUD shows for this frame. others: Array of [id, plane pos, name, alive].
+func refresh(sim: MechSim, me_name: String, status: String, round_time: float, camera: Camera3D, others: Array, nearest_id: int, dt: float) -> void:
+	_status.text = status
+	_camera = camera
+	_nearest_id = nearest_id
+	var show_battle := sim != null
+	for d in [booster, playtime, weapon, self_state, focus, radar]:
+		if d:
+			d.visible = show_battle
+	if not show_battle:
+		if user_state:
+			user_state.visible = false
+		_tracked.clear()
+		overlay.queue_redraw()
+		return
+	_me = sim.pos
+	_me_alive = not sim.is_dead_complete
+	_me_low = sim.life > 0 and sim.life < sim.life_max / 10
+	var seen := {}
+	for o in others:
+		var id: int = o[0]
+		seen[id] = true
+		if not _tracked.has(id):
+			_tracked[id] = Tracked.new()
+		var t: Tracked = _tracked[id]
+		t.id = id
+		t.pos = o[1]
+		t.name = o[2]
+		t.alive = o[3]
+	for id in _tracked.keys():
+		if not seen.has(id):
+			_tracked.erase(id)
+	if booster == null:
+		overlay.queue_redraw()
+		return
+	if not _weapons_set:
+		_weapons_set = true
+		_initial_weapons(sim.stats.weapons.slice(0, 4))
+	time_update(round_time)
+	booster_update(int(sim.booster_gage), int(sim.energy_max), int(sim.energy_low_line))
+	self_user_state(ZEID_FACE, me_name, maxi(0, sim.life), 1)
+	weapon_update(sim.weapon.id, sim.recharge / sim.weapon.reload, sim.weapon.name)
+	weapon_number_show(0)
+	weapon_full_number_show(0)
+	if _user_state_time > 0.0:
+		_user_state_time -= dt
+		if _user_state_time <= 0.0:
+			user_state.visible = false
+	# Radar::update: alpha falls 200 a second, then jumps back to full.
+	_spattack_alpha -= 200.0 * dt
+	if _spattack_alpha < 0.0:
+		_spattack_alpha = 255.0
+	overlay.queue_redraw()
+
+## OnTimeUpdate: the clock in hundredths, digit by digit. The last-but-one digit wraps at 6,
+## as in the original script, so the hundredths read 00..59 in steps of ten.
+func time_update(seconds: float) -> void:
+	_play_time_cs = seconds * 100.0
+	var digits := time_digits(seconds)
+	var names := ["number_one", "number_two", "number_three", "number_four", "number_five", "number_six"]
+	for i in 6:
+		playtime.w(names[i]).texture_switch(digits[i] + 1)
+
+static func time_digits(seconds: float) -> Array[int]:
+	var cs := seconds * 100.0
+	return [
+		int(floor(cs / 60000.0)) % 6, int(floor(cs / 6000.0)) % 10,
+		int(floor(cs / 1000.0)) % 6, int(floor(cs / 100.0)) % 10,
+		int(floor(cs / 10.0)) % 6, int(cs) % 10]
+
+## OnBoosterUpdate(amount, max_amount, overhit): the gauge fills a 391-pixel bar from the
+## bottom, the red part marks the low line, and the readout rides the gauge's top. Below
+## the low line the readout hides and the marker flickers between its two warning images.
+func booster_update(amount: int, max_amount: int, overhit: int) -> void:
+	var base := booster.w("booster_base")
+	var bar := base.w("booster_bar")
+	var gage := base.w("gage_bar")
+	var stats := booster.w("stats_bar")
+	var num := stats.w("booster_num")
+	bar.texture_switch(2)
+	stats.texture_switch(1)
+	gage.texture_switch(1)
+	num.visible = true
+	num.text_set(str(amount), Color8(27, 229, 32))
+	var rate := float(amount) / float(max_amount)
+	bar.size_set(9, -391.0 * float(overhit) / float(max_amount))
+	gage.size_set(9, -391.0 * rate)
+	stats.pos_set(0, 388.0 * (1.0 - rate))
+	if amount < overhit:
+		num.visible = false
+		gage.texture_switch(2)
+		bar.size_set(9, -391.0 * rate)
+		var test := fmod(_play_time_cs * 0.5, 2.0)
+		stats.texture_switch(2 if test < 1.0 else 3)
+
+## ON_self_user_state_wnd(robot, name, hp, level): face, name, level and four big HP digits.
+func self_user_state(robot: int, user_name: String, hp: int, level: int) -> void:
+	var digits := [hp / 1000, (hp / 100) % 10, (hp / 10) % 10, hp % 10]
+	var names := ["hp_num_one", "hp_num_two", "hp_num_three", "hp_num_four"]
+	for i in 4:
+		self_state.w(names[i]).texture_switch(digits[i] + 1)
+	self_state.w("robot_face").texture_switch(robot)
+	self_state.w("user_name_edit").text_set(user_name, Color8(43, 43, 43))
+	self_state.w("user_level_edit").text_set(str(level), Color8(43, 43, 43))
+
+## OnInitialWeaponUpdate: the four slot icons, by the body's default weapon ids (the Zeid's
+## are 28, 3, 4, 2). Id 28 is past the icon list, so that slot shows no icon, as it did.
+func _initial_weapons(ids: Array) -> void:
+	for i in 4:
+		weapon.w("item_slot_%d_img" % (i + 1)).texture_switch(ids[i])
+		weapon.w("item_slot_%d_img_selete" % (i + 1)).texture_switch(ids[i])
+
+## OnWeaponUpdate(weapon_id, recharging_time, weapon_name) for the SR-3 in slot 2: the
+## recharge ring steps through 16 images as the reload fills, the slot glows near the end.
+func weapon_update(weapon_id: int, ratio: float, weapon_name: String) -> void:
+	var slot := weapon.w("item_slot_2")
+	var ring := weapon.w("recharge_img")
+	slot.texture_switch(1)
+	ring.texture_switch(1)
+	var steps := [0.06, 0.12, 0.18, 0.24, 0.3, 0.36, 0.42, 0.48, 0.54, 0.6, 0.69, 0.77, 0.85, 0.93, 1.0]
+	var rings := [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16, 17]
+	for i in steps.size():
+		if ratio <= steps[i]:
+			ring.texture_switch(rings[i])
+			if i == 13:
+				slot.texture_switch(14)
+			elif i == 14:
+				slot.texture_switch(15)
+			break
+	weapon.w("weapon_img").texture_switch(weapon_id)
+	weapon.w("weapon_name").text_set(weapon_name)
+	weapon.w("item_selecte_mark").pos_set(219, 31)
+	for i in range(1, 7):
+		var img := weapon.w("item_slot_%d_img" % i)
+		if img:
+			img.visible = i != 2
+		var sel := weapon.w("item_slot_%d_img_selete" % i)
+		if sel:
+			sel.visible = i == 2
+	for i in [1, 3, 4]:
+		weapon.w("item_slot_%d" % i).texture_switch(1)
+
+## game_fight_weapon_number_show and _full_number_show: ammo left and ammo per load. The
+## SR-3 has no ammo limit, so the original showed 0000 / 0000.
+func weapon_number_show(n: int) -> void:
+	_four_digits(["weapon_number_one", "weapon_number_two", "weapon_number_three", "weapon_number_four"], n)
+
+func weapon_full_number_show(n: int) -> void:
+	_four_digits(["weapon_full_number_one", "weapon_full_number_two", "weapon_full_number_three", "weapon_full_number_four"], n)
+
+func _four_digits(names: Array, n: int) -> void:
+	var digits := [n / 1000, (n / 100) % 10, (n / 10) % 10, n % 10]
+	for i in 4:
+		weapon.w(names[i]).texture_switch(digits[i] + 1)
+
+## ON_user_state_wnd(robot, energy_scale, name, grade), called when your shot lands:
+## the target's face, name and energy bar for 2 seconds, the bar easing over 0.8 s.
+func show_target(robot: int, energy: float, target_name: String) -> void:
+	if user_state == null:
+		return
+	user_state.visible = true
+	_user_state_time = 2.0
+	user_state.w("robot_face").texture_switch(robot)
+	user_state.w("grade").texture_switch(1)
+	user_state.w("user_name_edit").text_set(target_name)
+	var gage := user_state.w("energy_bar").w("energy_gage")
+	var tw := gage.create_tween()
+	tw.tween_method(func(v: float) -> void: gage.size_set(v, 8), gage.wsize.x, 75.0 * clampf(energy, 0.0, 1.0), 0.8)
+
+# --- Radar, markers, names (Radar::render_player, render_name) ------------------------------
+
+func _to_screen(p: Vector2, plane_up := 0.0) -> Vector2:
+	var px := _camera.unproject_position(Original.to_godot(p + Vector2(0, plane_up)))
+	return (px - screen.position) / screen.scale
+
+func _draw_overlay() -> void:
+	if _camera == null or booster == null or not booster.visible:
+		return
+	var ours := OriginalUI.texture("ui/widget/game_fight/rader/ours.png")
+	var hood_near := OriginalUI.texture("ui/widget/game_fight/rader/hood_player_enemy.png")
+	var hood_far := OriginalUI.texture("ui/widget/game_fight/rader/hood_player_enemy_far.png")
+	var font := ThemeDB.fallback_font
+	# Every free-for-all player is team 0, so every dot uses the "ours" image.
+	if ours:
+		overlay.draw_texture_rect(ours, Rect2(RADAR_POS, Vector2(5, 5)), false)
+	for t: Tracked in _tracked.values():
+		if not t.alive:
+			continue
+		var rel := Vector2(t.pos.x - _me.x, -(t.pos.y - _me.y)) * RADAR_SCALE
+		if absf(rel.x) <= RADAR_HALF.x and absf(rel.y) <= RADAR_HALF.y and ours:
+			overlay.draw_texture_rect(ours, Rect2(RADAR_POS + rel, Vector2(5, 5)), false)
+		var on_screen := _to_screen(t.pos)
+		var inside := on_screen.x >= 0 and on_screen.x <= SCREEN.x and on_screen.y >= 0 and on_screen.y <= SCREEN.y
+		if inside:
+			# Name 105 x 0.3 + 5 units up the plane, drawn 40 pixels left of that point.
+			var at := _to_screen(t.pos, 105.0 * Original.SCALE + 5.0) + Vector2(-40, 0)
+			overlay.draw_string_outline(font, at, t.name, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, 3, Color(0, 0, 0, 0.9))
+			overlay.draw_string(font, at, t.name, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, TEAM0_COLOR)
+		else:
+			# get_position_on_hood: a marker on a 180-pixel ring, moved only past 5 pixels.
+			var slope := atan2(t.pos.y - _me.y, t.pos.x - _me.x)
+			var hp := HOOD_CENTRE + Vector2(cos(slope), -sin(slope)) * HOOD_RANGE
+			if not t.hood_set or hp.distance_squared_to(t.hood_pos) > 25.0:
+				t.hood_pos = hp
+				t.hood_set = true
+			var tex := hood_near if t.id == _nearest_id else hood_far
+			if tex:
+				overlay.draw_set_transform(t.hood_pos + Vector2(5, 5), -slope)
+				overlay.draw_texture_rect(tex, Rect2(Vector2(-5, -5), Vector2(10, 10)), false, TEAM0_COLOR)
+				overlay.draw_set_transform(Vector2.ZERO)
+	# Under 10% life, SPAttack.png pulses below your mech.
+	if _me_low and _me_alive:
+		var warn := OriginalUI.texture("ui2/game_fight/spattack.png")
+		if warn:
+			var at := _to_screen(_me, -(80.0 * Original.SCALE + 5.0)) + Vector2(-70, 25)
+			overlay.draw_texture(warn, at, Color(1, 1, 1, _spattack_alpha / 255.0))
+
+# --- Results (this recreation's own panel) --------------------------------------------------
 
 func _build_result() -> void:
 	_result = ColorRect.new()
@@ -102,52 +373,6 @@ func _build_result() -> void:
 	_result_footer.add_theme_color_override("font_color", Color(0.65, 0.7, 0.8))
 	box.add_child(_result_footer)
 	_result.visible = false
-
-func _label(text: String, pos: Vector2, size: int, color: Color) -> Label:
-	var l := Label.new()
-	l.text = text
-	l.position = pos
-	l.add_theme_font_size_override("font_size", size)
-	l.add_theme_color_override("font_color", color)
-	add_child(l)
-	return l
-
-func _bar(pos: Vector2, size: Vector2, color: Color) -> ColorRect:
-	var r := ColorRect.new()
-	r.color = color
-	r.position = pos
-	r.size = size
-	add_child(r)
-	return r
-
-func refresh(sim: MechSim, target: MechSim, depth: float, dt: float, status: String, round_time: float) -> void:
-	visible = sim != null or status != ""
-	_status.text = status
-	_clock.text = clock_text(round_time)
-	_blink += dt
-	_marker_time = maxf(0.0, _marker_time - dt)
-	_marker.visible = _marker_time > 0.0
-	if sim == null:
-		_warning.visible = false
-		return
-	_gauge_fill.size.x = GAUGE_W * sim.booster_gage / sim.energy_max
-	_gauge_fill.color = Color(1, 0.45, 0.3) if sim.booster_gage <= sim.energy_low_line else Color(0.3, 0.8, 1.0)
-	_low_line.position = Vector2(30 + GAUGE_W * sim.energy_low_line / sim.energy_max, 42)
-	_gauge_label.text = "%4d / %d    speed %5.1f%s" % [int(sim.booster_gage), int(sim.energy_max), sim.speed(), "  BOOST" if sim.acc_flag else ""]
-	_hp_fill.size.x = BAR_W * maxf(0.0, float(sim.life)) / float(sim.life_max)
-	_hp_fill.color = Color(1, 0.4, 0.3) if sim.life < int(sim.life_max * 0.1) else Color(0.4, 0.95, 0.5)
-	_rifle_fill.size.x = BAR_W * sim.recharge / sim.weapon.reload
-	_target_fill.size.x = BAR_W * maxf(0.0, float(target.life)) / float(target.life_max) if target else 0.0
-	_weapon_label.text = sim.weapon.name
-	_info.text = "HP %d    enemy HP %s    camera %d" % [maxi(0, sim.life), str(maxi(0, target.life)) if target else "-", int(depth)]
-	_warning.visible = sim.booster_warning_time > 0.0 and fmod(_blink, 0.3) < 0.2
-
-## HIT! for the shooter, DAMAGE! for the one hit (Damage::PUT_HIT, Damage::PUT_DAMAGE).
-func show_marker(screen_pos: Vector2, text: String) -> void:
-	_marker.text = text
-	_marker.add_theme_color_override("font_color", Color(1, 0.85, 0.3) if text == "HIT!" else Color(1, 0.45, 0.35))
-	_marker.position = screen_pos + Vector2(-40, -70)
-	_marker_time = 0.4
 
 func show_result(title: String, lines: Array[String], footer: String) -> void:
 	_result_title.text = title

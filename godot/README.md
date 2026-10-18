@@ -9,6 +9,7 @@ brew install --cask godot        # 4.7.2
 brew install assimp              # 6.0.5, only for converting art
 python3 -I godot/tools/convert_original.py "RaycrashArchive/extracted/source/ATC BIN/bin/data" godot/assets/original
 python3 -I godot/tools/extract_db.py RaycrashArchive/extracted/database/raycrash1 godot/assets/original/data
+python3 -I godot/tools/extract_ui.py "RaycrashArchive/extracted/source/ATC BIN/bin/data" godot/assets/original
 godot --path godot               # play
 godot --path godot -e            # open in the editor
 godot --headless --path godot -s tests/test_mech_sim.gd   # logic tests
@@ -91,8 +92,49 @@ Pick the arena in the menu, or add `map=<id>` after `--`. The host's choice goes
 - Start points are the server's: twelve around a circle (radius 1000, 600 for G-Session)
   or the City table, picked at random without repeats each round (`position_set`).
 
+## HUD (from `page_game_fight.lua`, the `res/game_fight_*.lua` window tables and `radar.cpp`)
+
+The battle HUD is the original's art and layout. `tools/extract_ui.py` reads the Lua window
+tables as data (it never runs them) and `scripts/original_ui.gd` rebuilds the engine's
+windows from them: a position, a size and a switchable texture list, drawn the way
+`Window::draw_self` drew them. The original's screen was 800x600; the HUD is laid out on
+that and scaled to the window.
+
+- Top left: robot face, name, level and HP as four big digits (`ON_self_user_state_wnd`).
+- Left edge: the boost gauge, a 391-pixel bar with the low line marked and the readout
+  riding the gauge's top; below the low line the readout hides and the marker flickers
+  (`OnBoosterUpdate`).
+- Top centre: the clock (`OnTimeUpdate`), including the script's quirk where the tens of
+  hundredths wrap at 6.
+- Bottom left: the weapon panel with the SR-3 art, the recharge ring stepping through 16
+  images as it reloads, the four weapon slots, and `0000 / 0000` ammo, since the SR-3 has
+  no ammo limit.
+- Right: for 2 seconds after each hit you land, the target's face, name and energy bar
+  (`ON_user_state_wnd`).
+- Radar (top right): dots at 0.08 scale within 1000 x 750 units. Every free-for-all player
+  is team 0, so every dot uses the same "ours" image, as in the original.
+- Off-screen players: a marker on a 180-pixel ring round the screen centre, the nearest
+  one with the brighter image. Names float over mechs on screen, in team 0 green.
+- Under 10% HP, the SPAttack warning pulses under your mech.
+- HIT! when your shot lands and DAMAGE! when you are hit, the original particle scripts'
+  textures, 100 units up the screen from your own mech (`World::process_damage`).
+
+## Sound (from `NubAudiere.cpp`, `BGM.cpp` and the weapon scripts)
+
+- Each shot plays `gunfire1`, a hit plays `gun_Hit` at the mech hit, a boost start plays
+  `sp_booster`, bouncing off the arena edge plays `special_fire`, a knockout plays
+  `bomb-complete`.
+- Volume and pan are set once when a sound starts. The listener is over the camera but 300
+  units off the plane, so a sound right below plays at 0.625 and fades out linearly by about
+  740 units away. Pan is the sideways offset x 0.005 with a 50-unit dead zone.
+- Each round starts a random track from the first 19 of the original play list; the winner
+  hears `victory`, everyone else `defeat`. Two list entries point at a folder that does not
+  exist, so about one round in ten is silent, as it was.
+- Add `mute` after `--` to start silent.
+
 Test options, added after `--`: `netlog` prints positions once a second, `hp=60` starts every
-mech with 60 HP for quick knockouts, `capture=<dir>` saves 30 JPEG frames a second.
+mech with 60 HP for quick knockouts, `capture=<dir>` saves 30 JPEG frames a second (run the
+window with `--max-fps 60`, or it runs unthrottled). `--write-movie` records sound as well.
 
 ## Controls (as in the original)
 
@@ -103,6 +145,7 @@ mech with 60 HP for quick knockouts, `capture=<dir>` saves 30 JPEG frames a seco
 | Left click | Fire the SR-3: 3-round burst, then the reload |
 | Right click (hold) | Boost, draining the gauge |
 | + / - | Camera depth. Otherwise it follows the nearest enemy automatically |
+| M | Sound and music on or off (this recreation's own) |
 | Esc | Leave the match |
 
 ## How the original plays (read from its source)
@@ -143,11 +186,16 @@ parts added to the base stats.
   identifies it as `continuous_time`, the gap between shots.
 - The fire animation length (0.5 s) comes from the converted clip; the original playback rate
   of `.x` animations is assumed to match.
-- Booster flames are placeholder particles. The original uses particle scripts in
-  `data/script/particle`.
+- Booster flames and the knockout burst are placeholder particles. Only the single-quad case
+  of the original particle engine (`psys.cpp`) is ported, for HIT! and DAMAGE!.
 - SR-3 mode 2 (7-shot spray) is defined but not wired. How the original switches modes is not
   traced yet.
-- The rifle's own animation, sounds and the original HUD art are not in yet.
+- The rifle's own animation is not in yet.
+- Within one draw order the original drew sibling windows in Lua's hash order, which is
+  not recoverable. Text windows are drawn last so names stay readable (inferred).
+- The results screen is this recreation's own panel, not the original's result page.
+- The original drew HUD text with its own bitmap font; Godot's default font stands in.
+- The weapon change sound (`gun_start`) is copied but unused, since weapons do not switch yet.
 - City's sky uses `mount01.png`, which is not in the archive, so that part draws untextured.
 - Starting facing is toward the arena centre. The original's start direction is not in the
   source we have (inferred).
@@ -157,7 +205,7 @@ parts added to the base stats.
   original used whichever its collision library reported first.
 - Light strengths are matched by eye; Direct3D's fixed-function lighting has no exact
   Godot equivalent.
-- The hit effect's scale and growth are inferred.
+- The bullet impact flash's scale and growth are inferred.
 - Team mode, more than two players, NPCs, money and grades are not in yet.
 - The character explosion's particles are a stand-in; the original defines them in script.
 - No lag compensation. Fine on a home network, untested over the internet.
@@ -177,11 +225,15 @@ scripts/battle_world.gd  scenery and effects: arena, sky, lights, booster flames
 scripts/battle_map.gd    an arena's bounds, start points, lights and the edge bounce
 scripts/map_collision.gd wall triangles on a plane grid: sphere and segment tests
 scripts/start_menu.gd    practice, host and join menu
-scripts/hud.gd           placeholder readouts
+scripts/hud.gd           the original battle HUD: dialogs, radar, markers, name tags
+scripts/original_ui.gd   the engine's UI windows, built from the exported Lua tables
+scripts/game_sound.gd    positioned sound effects and the BGM play list
+scripts/particle_quad.gd one layer of an original particle script (single-quad case)
 tools/convert_original.py   .x to glTF converter (reads the archive, writes assets/original)
 tools/extract_db.py         reads game tables straight out of the SQL Server 2000 backup
 tools/inspect_import.gd     prints an imported model's tree and clips
 tools/render_poses.gd       renders the mech at several facings
 tools/render_map.gd         renders an arena from above with its walls, bounds and start points
-tests/test_mech_sim.gd      67 checks against the original database values and rules
+tools/extract_ui.py         reads the HUD window tables and particle scripts, copies their art
+tests/test_mech_sim.gd      76 checks against the original database values and rules
 ```
