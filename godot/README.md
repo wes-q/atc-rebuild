@@ -20,15 +20,44 @@ tables (robots, weapons, parts, shop catalogue) and never player, clan, log or b
 
 Record a scripted demo: `godot --path godot --write-movie out.avi --fixed-fps 30 --quit-after 300 -- autopilot`
 
+## Two players
+
+Start the game on two computers on the same network. One chooses **Host a match**, the
+other types the host's address into the box and chooses **Join**. The host's screen shows
+its address. You can skip the menu from the command line:
+
+```
+godot --path godot -- host                  # player 1, listens on port 7777
+godot --path godot -- join 192.168.1.20     # player 2, the host's address
+godot --path godot -- practice              # alone, against a target dummy
+```
+
+- macOS may ask whether Godot can accept incoming connections the first time you host.
+  Allow it, or player 2 cannot connect.
+- Two windows on one computer also connect, but only the window in front gets the keyboard
+  and mouse, so two people cannot play at once that way. It is useful for testing.
+- Player 1 is the Zeid's default blue and white. Player 2 uses its second original colour
+  scheme, dark grey and violet.
+- Esc leaves the match and returns to the menu.
+
+How it works, following the original client: each player runs their own mech and sends its
+state 60 times a second. Shots go out as events, so both screens show every bullet. The
+player who is hit decides the damage (the SR-3's database setting), then reports their HP.
+Remote mechs glide toward their reported position the way the original eased toward
+`lastRealPos`. Knockouts currently respawn after 2 seconds; the original rules come next.
+
+Add `netlog` to print every mech's position once a second, for debugging.
+
 ## Controls (as in the original)
 
 | Input | Action |
 |---|---|
 | WASD or arrows | Move along the screen axes |
 | Mouse | Aim. The mech turns toward the cursor at its turn rate |
-| Left click | Fire the SR-3: 3-round burst, then a 1 s recharge |
+| Left click | Fire the SR-3: 3-round burst, then the reload |
 | Right click (hold) | Boost, draining the gauge |
 | + / - | Camera depth. Otherwise it follows the nearest enemy automatically |
+| Esc | Leave the match |
 
 ## How the original plays (read from its source)
 
@@ -74,7 +103,8 @@ parts added to the base stats.
   traced yet.
 - The rifle's own animation, sounds, the original HUD art and the map's objects are not in yet.
 - The hit effect's scale and growth are inferred.
-- Online play and a second player are not in the Godot version yet.
+- No knockout rules, rounds or scores yet. A knocked-out mech respawns after 2 seconds.
+- No lag compensation. Fine on a home network, untested over the internet.
 
 ## Layout
 
@@ -86,7 +116,8 @@ scripts/game_data.gd     loads the database export and applies the original conv
 scripts/mech_sim.gd      movement, boost gauge, facing, rifle: pure logic, tested
 scripts/mech_view.gd     model, retargeted animations, rifle, the original rotation table
 scripts/bullet.gd        SR-3 rounds
-scripts/game.gd          camera, sky, target dummy, wiring, autopilot demo
+scripts/game.gd          modes, networking, camera, sky, bullets, target dummy, autopilot
+scripts/start_menu.gd    practice, host and join menu
 scripts/hud.gd           placeholder readouts
 tools/convert_original.py   .x to glTF converter (reads the archive, writes assets/original)
 tools/extract_db.py         reads game tables straight out of the SQL Server 2000 backup

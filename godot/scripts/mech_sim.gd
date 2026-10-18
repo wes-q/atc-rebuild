@@ -268,3 +268,56 @@ func move_clip() -> int:
 	if forward:
 		return Original.MOVE_BOOSTER_FORWARD if acc_flag else Original.MOVE_FORWARD
 	return Original.MOVE_BOOSTER_BACK if acc_flag else Original.MOVE_BACK
+
+# --- Network -----------------------------------------------------------------------------
+# Each player moves their own mech and broadcasts its state, like the original client did
+# with its move protocol. Remote copies only display that state.
+
+## Reported position, advanced by velocity between packets (rcPlayer::lastRealPos).
+var real_pos := Vector2.ZERO
+var _has_snapshot := false
+
+## Owner's state, sent every physics tick.
+func snapshot() -> Array:
+	return [pos.x, pos.y, facing, move_dir.x, move_dir.y, _last_vel, int(acc_flag),
+		speed_state, int(attacking), life, booster_gage]
+
+## Applies an owner's snapshot to a remote copy.
+func apply_snapshot(s: Array) -> void:
+	real_pos = Vector2(s[0], s[1])
+	facing = int(s[2])
+	move_dir = Vector2(s[3], s[4])
+	_last_vel = float(s[5])
+	acc_flag = int(s[6]) != 0
+	speed_state = int(s[7])
+	attacking = int(s[8]) != 0
+	life = int(s[9])
+	booster_gage = float(s[10])
+	if not _has_snapshot:
+		pos = real_pos
+		_has_snapshot = true
+
+## rcPlayer::update for remote players: carry the reported position forward at the reported
+## velocity, then ease the drawn position 10% of the way toward it each tick.
+func step_remote(dt: float) -> void:
+	real_pos += move_dir * _last_vel * dt
+	pos += (real_pos - pos) * 0.1
+
+## Back to full health and gauge at a spawn point, standing still.
+func reset_at(spawn: Vector2, face: int) -> void:
+	pos = spawn
+	real_pos = spawn
+	facing = face
+	move_dir = Vector2.ZERO
+	vel_scalar = 0.0
+	acc_flag = false
+	add_vel = 0.0
+	_last_vel = 0.0
+	speed_state = 0
+	life = life_max
+	booster_gage = energy_max
+	recharge = weapon.reload
+	_burst_left = 0
+	attacking = false
+	_booster_input = BoosterInput.NOTHING
+	_prev_keys = [false, false, false, false]

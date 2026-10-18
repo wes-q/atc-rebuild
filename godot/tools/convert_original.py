@@ -30,6 +30,12 @@ ASSETS = [
 
 IMAGE_TYPES = {".png", ".jpg", ".jpeg"}
 
+# Colour schemes swapped onto the model at runtime (character_mapping_parameter.lua).
+TEXTURES = [
+    ("item02/armor/color/zeid/zeid_p01.png", "zeid/zeid_p01.png"),
+    ("item02/armor/color/zeid/zeid_p02.png", "zeid/zeid_p02.png"),
+]
+
 
 def find_case_insensitive(base: pathlib.Path, rel: str) -> pathlib.Path:
     """The archive mixes .x and .X, so match each path segment ignoring case."""
@@ -114,6 +120,11 @@ def main() -> None:
     out_dir = pathlib.Path(sys.argv[2]).resolve()
     for rel, name in ASSETS:
         convert(data_dir, out_dir, rel, name)
+    for rel, name in TEXTURES:
+        src = find_case_insensitive(data_dir, rel)
+        (out_dir / name).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, out_dir / name)
+        print(f"{rel} -> {name}")
 
 
 if __name__ == "__main__":

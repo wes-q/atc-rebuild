@@ -8,6 +8,8 @@ const MODEL := "res://assets/original/zeid/zeid_model.gltf"
 const WEAPON_CLIPS := "res://assets/original/zeid/zeid_weapon02.gltf"
 const MOVE_CLIPS := "res://assets/original/zeid/zeid_weapon02_move.gltf"
 const RIFLE := "res://assets/original/zeid/rifle_sr3.gltf"
+## Colour schemes from character_mapping_parameter.lua. Empty keeps the model's own texture.
+const SKINS := ["", "res://assets/original/zeid/zeid_p02.png", "res://assets/original/zeid/zeid_p01.png"]
 
 ## Original space (left-handed, camera on -Y) to Godot space: (x, y, z) -> (x, -y, -z).
 const G := Basis(Vector3(1, 0, 0), Vector3(0, -1, 0), Vector3(0, 0, -1))
@@ -103,3 +105,19 @@ func muzzle_plane_pos() -> Vector2:
 	if rifle_muzzle == null:
 		return Original.to_plane(global_position)
 	return Original.to_plane(rifle_muzzle.global_position)
+
+## Swaps the model's texture for one of the original colour schemes.
+func set_skin(index: int) -> void:
+	var path: String = SKINS[index % SKINS.size()]
+	if path == "" or not ResourceLoader.exists(path):
+		return
+	var tex := load(path) as Texture2D
+	for n in model.find_children("*", "MeshInstance3D", true, false):
+		var mi := n as MeshInstance3D
+		for i in mi.mesh.get_surface_count():
+			var src := mi.mesh.surface_get_material(i) as StandardMaterial3D
+			if src == null or src.albedo_texture == null:
+				continue
+			var mat := src.duplicate() as StandardMaterial3D
+			mat.albedo_texture = tex
+			mi.set_surface_override_material(i, mat)

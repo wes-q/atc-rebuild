@@ -31,7 +31,7 @@ What the archive contains: `docs/archive-inventory.md`.
 | # | Step | Status |
 |---|---|---|
 | 1 | Zeid walking, boosting and firing the SR-3 on the original numbers | Done |
-| 2 | Two players over the network | In progress |
+| 2 | Two players over the network | Done |
 | 3 | Damage, knockouts and rounds | Next |
 | 4 | A real battle map: scenery and collision grid | |
 | 5 | Sound and the original HUD art | |
