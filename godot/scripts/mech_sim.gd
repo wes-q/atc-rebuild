@@ -23,6 +23,8 @@ class Intent:
 		return left or right or up or down
 
 signal fired(origin: Vector2, deg: int)
+## Fully destroyed: is_dead_complete in rcPlayer::update_dead. The mech stops being drawn.
+signal exploded
 
 # Stats from the original database, via GameData.
 var stats: GameData.Robot
@@ -89,13 +91,47 @@ func _init(body := "zeid", weapon_slot := 1) -> void:
 	booster_gage = energy_max
 	recharge = weapon.reload
 
+# Death (rcPlayer::update_dead). life <= 0 stops the mech and blocks input; 0.1 s later
+# (time_to_dead_complete) it is fully destroyed.
+const TIME_TO_DEAD_COMPLETE := 0.1
+var is_dead := false
+var is_dead_complete := false
+var _dead_time := 0.0
+
+## Applies a hit. Returns true if this hit knocked the mech out.
+func take_damage(amount: int) -> bool:
+	if life <= 0:
+		return false
+	life = maxi(0, life - amount)
+	return life <= 0
+
 func step(intent: Intent, dt: float) -> void:
+	if _update_dead(dt):
+		return
 	_update_booster_gauge(intent, dt)
 	_update_move(intent)
 	_update_rotation(intent, dt)
 	_update_physics(dt)
 	_update_rifle(intent, dt)
 	booster_warning_time = maxf(0.0, booster_warning_time - dt)
+
+## Returns true while dead, so nothing else runs.
+func _update_dead(dt: float) -> bool:
+	if life > 0:
+		return false
+	if not is_dead:
+		is_dead = true
+		_dead_time = TIME_TO_DEAD_COMPLETE
+		_send_move(0, 0)
+		_burst_left = 0
+		attacking = false
+		_last_vel = 0.0
+	if not is_dead_complete:
+		_dead_time -= dt
+		if _dead_time <= 0.0:
+			is_dead_complete = true
+			exploded.emit()
+	return true
 
 ## rcPlayerManager::update_booster. Drains while the button is held, otherwise recovers,
 ## at half rate below the low line. An empty gauge drops a boost back to walking.
@@ -280,7 +316,7 @@ var _has_snapshot := false
 ## Owner's state, sent every physics tick.
 func snapshot() -> Array:
 	return [pos.x, pos.y, facing, move_dir.x, move_dir.y, _last_vel, int(acc_flag),
-		speed_state, int(attacking), life, booster_gage]
+		speed_state, int(attacking), life, booster_gage, int(is_dead_complete)]
 
 ## Applies an owner's snapshot to a remote copy.
 func apply_snapshot(s: Array) -> void:
@@ -293,6 +329,8 @@ func apply_snapshot(s: Array) -> void:
 	attacking = int(s[8]) != 0
 	life = int(s[9])
 	booster_gage = float(s[10])
+	is_dead = life <= 0
+	is_dead_complete = s.size() > 11 and int(s[11]) != 0
 	if not _has_snapshot:
 		pos = real_pos
 		_has_snapshot = true
@@ -315,6 +353,8 @@ func reset_at(spawn: Vector2, face: int) -> void:
 	_last_vel = 0.0
 	speed_state = 0
 	life = life_max
+	is_dead = false
+	is_dead_complete = false
 	booster_gage = energy_max
 	recharge = weapon.reload
 	_burst_left = 0

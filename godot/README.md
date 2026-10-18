@@ -42,11 +42,27 @@ godot --path godot -- practice              # alone, against a target dummy
 
 How it works, following the original client: each player runs their own mech and sends its
 state 60 times a second. Shots go out as events, so both screens show every bullet. The
-player who is hit decides the damage (the SR-3's database setting), then reports their HP.
-Remote mechs glide toward their reported position the way the original eased toward
-`lastRealPos`. Knockouts currently respawn after 2 seconds; the original rules come next.
+player who is hit decides the damage (the SR-3's database setting), then reports it to
+everyone. Remote mechs glide toward their reported position the way the original eased toward
+`lastRealPos`.
 
-Add `netlog` to print every mech's position once a second, for debugging.
+## Match rules (from the original server and client)
+
+- Free-for-all, last mech standing (`GameRoom::is_game_end`, mode 0). No respawns.
+- HP is the body's armour points (700 for the Zeid). Each hit plays one of the two hit
+  reactions unless the mech is mid-attack.
+- At 0 HP the mech stops and takes no input, and 0.1 s later it explodes into the original
+  debris model and is no longer drawn (`rcPlayer::update_dead`).
+- Under 10% HP, small explosions spark off the mech, more often as HP drops.
+- The match ends the moment one mech is left. The clock counts up from zero; there is no
+  time limit.
+- Results show kills, damage dealt and points (damage / 10 x 0.825, the server's formula at
+  equal grades), plus rounds won this session.
+- The next round starts automatically 6 seconds after the results. This part is the
+  recreation's own: the original sent players back to a room lobby.
+
+Test options, added after `--`: `netlog` prints positions once a second, `hp=60` starts every
+mech with 60 HP for quick knockouts, `capture=<dir>` saves 30 JPEG frames a second.
 
 ## Controls (as in the original)
 
@@ -103,7 +119,8 @@ parts added to the base stats.
   traced yet.
 - The rifle's own animation, sounds, the original HUD art and the map's objects are not in yet.
 - The hit effect's scale and growth are inferred.
-- No knockout rules, rounds or scores yet. A knocked-out mech respawns after 2 seconds.
+- Team mode, more than two players, NPCs, money and grades are not in yet.
+- The character explosion's particles are a stand-in; the original defines them in script.
 - No lag compensation. Fine on a home network, untested over the internet.
 
 ## Layout
@@ -116,12 +133,13 @@ scripts/game_data.gd     loads the database export and applies the original conv
 scripts/mech_sim.gd      movement, boost gauge, facing, rifle: pure logic, tested
 scripts/mech_view.gd     model, retargeted animations, rifle, the original rotation table
 scripts/bullet.gd        SR-3 rounds
-scripts/game.gd          modes, networking, camera, sky, bullets, target dummy, autopilot
+scripts/game.gd          modes, networking, rounds, hits, camera, target dummy, autopilot
+scripts/battle_world.gd  scenery and effects: sky, grid, booster flames, hits, knockout explosion
 scripts/start_menu.gd    practice, host and join menu
 scripts/hud.gd           placeholder readouts
 tools/convert_original.py   .x to glTF converter (reads the archive, writes assets/original)
 tools/extract_db.py         reads game tables straight out of the SQL Server 2000 backup
 tools/inspect_import.gd     prints an imported model's tree and clips
 tools/render_poses.gd       renders the mech at several facings
-tests/test_mech_sim.gd      39 checks against the original database values
+tests/test_mech_sim.gd      49 checks against the original database values and rules
 ```

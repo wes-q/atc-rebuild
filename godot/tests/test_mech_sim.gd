@@ -20,6 +20,9 @@ func _init() -> void:
 	test_facing_turns_at_rotation_speed()
 	test_rifle_burst_and_recharge()
 	test_move_clips()
+	test_knockout_sequence()
+	test_snapshot_carries_knockout()
+	test_reset_revives()
 	print("\n%d passed, %d failed" % [passed, failures])
 	quit(1 if failures > 0 else 0)
 
@@ -196,3 +199,41 @@ func test_move_clips() -> void:
 	it.aim = Vector2(-1000, 0)
 	run(sim, it, 1.0)
 	check(sim.move_clip() == Original.MOVE_BACK, "moving away from it plays the back clip")
+
+func test_knockout_sequence() -> void:
+	print("knockout (rcPlayer::update_dead)")
+	var sim := MechSim.new()
+	var exploded := [false]
+	sim.exploded.connect(func() -> void: exploded[0] = true)
+	var it := MechSim.Intent.new()
+	it.right = true
+	it.fire = true
+	run(sim, it, 0.3)
+	check(not sim.take_damage(sim.life - 12), "a hit that leaves life above 0 is not a knockout")
+	check(sim.take_damage(12), "the hit that takes life to 0 is the knockout")
+	sim.step(it, DT)
+	check(sim.is_dead and not sim.is_dead_complete, "dead at once, not yet destroyed")
+	check(sim.speed() == 0.0 and not sim.attacking, "stops moving and firing")
+	var x := sim.pos.x
+	run(sim, it, 0.1)
+	check(sim.is_dead_complete and exploded[0], "destroyed 0.1 s later (time_to_dead_complete)")
+	check(near(sim.pos.x, x), "ignores input while dead")
+	check(not sim.take_damage(50), "further hits do nothing")
+
+func test_snapshot_carries_knockout() -> void:
+	print("network knockout state")
+	var owner := MechSim.new()
+	owner.take_damage(owner.life)
+	run(owner, MechSim.Intent.new(), 0.2)
+	var remote := MechSim.new()
+	remote.apply_snapshot(owner.snapshot())
+	check(remote.is_dead and remote.is_dead_complete and remote.life == 0, "a remote copy sees the knockout and the destruction")
+
+func test_reset_revives() -> void:
+	print("next round")
+	var sim := MechSim.new()
+	sim.take_damage(sim.life)
+	run(sim, MechSim.Intent.new(), 0.2)
+	sim.reset_at(Vector2(-150, 0), 0)
+	check(not sim.is_dead and not sim.is_dead_complete and sim.life == 700, "reset brings it back at full armour")
+	check(sim.booster_gage == 1900.0 and sim.pos == Vector2(-150, 0), "full gauge, at the spawn point")

@@ -8,6 +8,8 @@ const MODEL := "res://assets/original/zeid/zeid_model.gltf"
 const WEAPON_CLIPS := "res://assets/original/zeid/zeid_weapon02.gltf"
 const MOVE_CLIPS := "res://assets/original/zeid/zeid_weapon02_move.gltf"
 const RIFLE := "res://assets/original/zeid/rifle_sr3.gltf"
+## PLAYERANIM_DAMAGE and PLAYERANIM_DAMAGE_ETC (rcPlayer.cpp anim_load for the Zeid).
+const DAMAGE_CLIPS := ["res://assets/original/zeid/zeid_damage01.gltf", "res://assets/original/zeid/zeid_damage02.gltf"]
 ## Colour schemes from character_mapping_parameter.lua. Empty keeps the model's own texture.
 const SKINS := ["", "res://assets/original/zeid/zeid_p02.png", "res://assets/original/zeid/zeid_p01.png"]
 
@@ -31,6 +33,8 @@ func _init() -> void:
 	var lib := AnimationLibrary.new()
 	_import_clips(lib, WEAPON_CLIPS, "weapon_")
 	_import_clips(lib, MOVE_CLIPS, "move_")
+	for i in DAMAGE_CLIPS.size():
+		_import_clips(lib, DAMAGE_CLIPS[i], "damage%d_" % i)
 	player.add_animation_library("", lib)
 	player.playback_default_blend_time = 0.15
 
@@ -88,6 +92,32 @@ func play_attack() -> void:
 
 func is_attack_playing() -> bool:
 	return _current == "weapon_%d" % Original.ANIM_ATTACK and player.is_playing()
+
+## rcPlayer::damage(DAMAGE_1): one of the two hit clips at random. Skipped mid-attack.
+func play_damage() -> void:
+	if is_attack_playing():
+		return
+	_play("damage%d_0" % (randi() % 2), false, true)
+
+## rcPlayer::update_dead: DAMAGE_EXPLOSION1 plays the first damage clip and holds.
+func play_death() -> void:
+	_play("damage0_0", false, true)
+
+## True while a hit reaction or the knockout pose is playing, so movement clips wait.
+func is_reacting() -> bool:
+	return _current.begins_with("damage") and player.is_playing()
+
+## Plays an effect model's own animation (the first clip), if it has one.
+static func play_effect(scene: Node, loop: bool) -> void:
+	var players := scene.find_children("*", "AnimationPlayer", true, false)
+	if players.is_empty():
+		return
+	var ap := players[0] as AnimationPlayer
+	var list := ap.get_animation_list()
+	if list.is_empty():
+		return
+	ap.get_animation(list[0]).loop_mode = Animation.LOOP_LINEAR if loop else Animation.LOOP_NONE
+	ap.play(list[0])
 
 func _play(clip: String, loop: bool, restart := false) -> void:
 	if clip == _current and not restart:

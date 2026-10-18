@@ -26,6 +26,9 @@ ASSETS = [
     ("weapon/bullet_zeid2.X", "zeid/bullet_sr3"),
     ("weapon/bullet_zeid_boom.X", "zeid/bullet_sr3_boom"),
     ("map/b_map01/skymap.X", "map/b_map01_skymap"),
+    ("anim/zeid_damage01.x", "zeid/zeid_damage01"),
+    ("anim/zeid_damage02.x", "zeid/zeid_damage02"),
+    ("anim/explo2_result.X", "fx/explo2_result"),
 ]
 
 IMAGE_TYPES = {".png", ".jpg", ".jpeg"}
@@ -64,11 +67,37 @@ def to_png(src: pathlib.Path, dst: pathlib.Path) -> None:
     subprocess.run(["sips", "-s", "format", "png", str(src), "--out", str(dst)], check=True, capture_output=True)
 
 
+# Binary .x data object "AnimTicksPerSecond { 4800 }", as written by the exporter in files
+# that have one (zeid_weapon02_middle.x). Some files omit it, and Assimp then writes
+# invalid key times. 4800 is the 3ds Max exporter default and matches the clip lengths.
+TICKS_INSTANCE = (
+    b"\x01\x00\x12\x00\x00\x00AnimTicksPerSecond"
+    b"\x0a\x00\x06\x00\x01\x00\x00\x00\xc0\x12\x00\x00\x0b\x00"
+)
+
+
+def with_tick_rate(src: pathlib.Path, work: pathlib.Path) -> pathlib.Path:
+    data = src.read_bytes()
+    if b"AnimationSet" not in data or not data.startswith(b"xof 0303bin"):
+        return src
+    if b"AnimTicksPerSecond\x0a\x00\x06\x00" in data:
+        return src
+    work.mkdir(parents=True, exist_ok=True)
+    patched = work / src.name
+    patched.write_bytes(data[:16] + TICKS_INSTANCE + data[16:])
+    return patched
+
+
 def convert(data_dir: pathlib.Path, out_dir: pathlib.Path, rel: str, out_name: str) -> None:
     src = find_case_insensitive(data_dir, rel)
     out = out_dir / f"{out_name}.gltf"
     out.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["assimp", "export", str(src), str(out), "-fgltf2"], check=True, capture_output=True)
+    work = out_dir / ".work"
+    readable = with_tick_rate(src, work)
+    subprocess.run(["assimp", "export", str(readable), str(out), "-fgltf2"], check=True, capture_output=True)
+    if readable != src:
+        readable.unlink()
+        print(f"  {rel}: added the missing 4800 ticks-per-second declaration")
 
     # Texture URIs carry the artists' old Windows paths in CP949. Decode bytes leniently,
     # then point each image at a real file found next to the model or in the texture folders.
