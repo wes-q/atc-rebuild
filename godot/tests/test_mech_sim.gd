@@ -36,6 +36,14 @@ func _init() -> void:
 	test_weapon_switching()
 	test_sword_combo()
 	test_missile_ammo_and_burst()
+	test_body_loadouts()
+	test_body_stats()
+	test_continuous_fire()
+	test_charge_weapon()
+	test_magazine()
+	test_splash_rules()
+	test_beam_rules()
+	test_stun()
 	print("\n%d passed, %d failed" % [passed, failures])
 	quit(1 if failures > 0 else 0)
 
@@ -493,3 +501,119 @@ func test_missile_ammo_and_burst() -> void:
 		sim.step(it, DT)
 		it.fire = false
 	check(times.size() == 2 and sim.slots[2].ammo == 0, "with 2 left, the burst is cut to 2")
+
+# --- Bodies (step 7) ------------------------------------------------------------------------
+
+func test_body_loadouts() -> void:
+	print("loadouts (Armor::init packs the slots, shields out)")
+	var want := {
+		"zeid": [28, 3, 4, 17], "redkite": [28, 6, 7, 18], "gigas": [28, 10, 11, 19],
+		"deff": [28, 13, 12, 20], "alicia": [21, 23, 24, 20],
+	}
+	for b in want:
+		var got := Bodies.loadout(b)
+		check(got == Array(want[b], TYPE_INT, "", null), "%s: %s" % [b, got])
+	check(GameData.weapon(21).name == "Saber Type 1" and GameData.weapon(21).damage == 41, "the Saber's row is read from the backup (41 damage)")
+
+func test_body_stats() -> void:
+	print("body stats (RobotInfo)")
+	var g := MechSim.new("gigas")
+	check(g.life_max == 1000 and g.move_speed == int(27 * 0.33 * 10) and near(g.crash_radius, 18.0), "Gigas: 1000 armour, walks 89, radius 18")
+	var a := MechSim.new("alicia")
+	check(a.life_max == 750 and near(a.energy_max, 1800.0), "Alicia: 750 armour, gauge BYTE(1850 / 100) x 100 = 1800")
+	check(g.weapon.name == "Heavy Machinegun" and a.weapon.name == "Double Hand Gun", "each starts on slot 2")
+
+func test_continuous_fire() -> void:
+	print("continuous fire (Heavy Machinegun)")
+	var sim := MechSim.new("gigas")
+	var w := sim.weapon
+	check(w.is_continuous and w.is_immediate() and near(w.line_distance, 198.0) and near(w.fire_interval, 0.08), "hold to fire, an instant 198-unit line, a round every 0.08 s")
+	var shots := [0]
+	sim.fired.connect(func(_o: Vector2, _d: int) -> void: shots[0] += 1)
+	var it := MechSim.Intent.new()
+	it.fire = true
+	run(sim, it, 1.0)
+	check(shots[0] >= 11 and shots[0] <= 13, "about 12 rounds a second while held (%d)" % shots[0])
+	it.fire = false
+	run(sim, it, 0.5)
+	var after: int = shots[0]
+	run(sim, it, 0.5)
+	check(shots[0] == after, "stops when let go")
+	check(sim.slots[1].ammo == 1500 - after, "one ammo a round (%d left)" % sim.slots[1].ammo)
+
+func test_charge_weapon() -> void:
+	print("charge (Plasma Bow)")
+	var sim := MechSim.new("alicia")
+	var it := MechSim.Intent.new()
+	it.weapon_key = 3
+	sim.step(it, DT)
+	it.weapon_key = 0
+	run(sim, it, 1.0)
+	check(sim.weapon.is_charge(), "the bow draws on the press")
+	var levels: Array[int] = []
+	sim.charge_changed.connect(func(l: int) -> void: levels.append(l))
+	var shots := [0]
+	sim.fired.connect(func(_o: Vector2, _d: int) -> void: shots[0] += 1)
+	it.fire = true
+	run(sim, it, 3.2)
+	check(shots[0] == 0 and sim.charge_level == 2, "nothing leaves while held; level 2 after 3 s (%d)" % sim.charge_level)
+	it.fire = false
+	run(sim, it, 0.2)
+	check(shots[0] == 1 and levels.has(1) and levels.has(2) and levels[-1] == -1, "the arrow leaves on release (%s)" % [levels])
+
+func test_magazine() -> void:
+	print("magazine (Double Hand Gun)")
+	var sim := MechSim.new("alicia")
+	var shots := [0]
+	sim.fired.connect(func(_o: Vector2, _d: int) -> void: shots[0] += 1)
+	var it := MechSim.Intent.new()
+	for i in 240:
+		it.fire = i % 2 == 0
+		sim.step(it, DT)
+	# Each attack is two shots; within a magazine of 7 the next is ready 0.1 s after the clip.
+	check(shots[0] >= 14, "7 attacks come quickly before the full reload (%d shots in 4 s)" % shots[0])
+	check(sim.slots[1].magazine_used < 7, "the count wraps after a full reload")
+
+func test_splash_rules() -> void:
+	print("splash (Cluster Cannon)")
+	var w := GameData.weapon(11)
+	check(near(w.splash_area, 132.0) and w.mode_num("splash_damage") == 52.0, "radius BYTE(450 / 100) x 100 x 0.33 = 132, splash 52")
+	check(Combat.splash_falloff(52, 132, 10) == 62, "inside a fifth of the radius: 52 x 1.2")
+	check(Combat.splash_falloff(52, 132, 70) == 26, "halfway: 52 less 5 steps of 10%")
+	check(Combat.splash_falloff(52, 132, 140) == 0, "outside the radius: nothing")
+	check(Combat.splash_direct(52, 60, 132, 5) == 134, "a direct hit close in: (52 + 60) x 1.2")
+
+func test_beam_rules() -> void:
+	print("beams")
+	check(near(GameData.weapon(7).line_distance, 660.0) and near(GameData.weapon(12).line_distance, 495.0), "Plasma Cannon 660, HV Head Beam 495")
+	check(GameData.weapon(7).is_pierce() and GameData.weapon(12).is_pierce() and not GameData.weapon(10).is_pierce(), "the cannon and head beam pierce, the machinegun does not")
+	check(Combat.line_hits(Vector2.ZERO, Vector2(100, 0), Vector2(50, 10), 13.5) and not Combat.line_hits(Vector2.ZERO, Vector2(100, 0), Vector2(50, 20), 13.5), "a line hits within the mech's radius")
+	var hv := Beam.new()
+	hv.setup(Vector2.ZERO, 0, GameData.weapon(12), 1)
+	var hits := 0
+	for i in 18:
+		if hv.register_contact(5, DT):
+			hits += 1
+	check(hits == 3, "the head beam hits again every 0.1 s of contact (%d in 0.3 s)" % hits)
+	var pc := Beam.new()
+	pc.setup(Vector2.ZERO, 0, GameData.weapon(7), 1)
+	var once := 0
+	for i in 18:
+		if pc.register_contact(5, DT):
+			once += 1
+	check(once == 1, "the cannon hits each mech once")
+	hv.free()
+	pc.free()
+
+func test_stun() -> void:
+	print("stun (Plasma Bow)")
+	var sim := MechSim.new()
+	sim.stun_time = Combat.bow_stun_time(2)
+	check(near(sim.stun_time, 2.0), "2 s at full charge")
+	var it := MechSim.Intent.new()
+	it.right = true
+	it.fire = true
+	var shots := [0]
+	sim.fired.connect(func(_o: Vector2, _d: int) -> void: shots[0] += 1)
+	run(sim, it, 1.0)
+	check(sim.pos == Vector2.ZERO and shots[0] == 0, "no moving or firing while stunned")

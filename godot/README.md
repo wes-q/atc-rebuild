@@ -8,16 +8,17 @@ Private recreation of ATC Raycrash (CodiNET, 2005) using its own rules and art. 
 brew install --cask godot        # 4.7.2
 brew install assimp              # 6.0.5, only for converting art
 brew install ffmpeg              # optional: cleans the original sound files' tags
-python3 -I godot/tools/convert_original.py "RaycrashArchive/extracted/source/ATC BIN/bin/data" godot/assets/original
 python3 -I godot/tools/extract_db.py RaycrashArchive/extracted/database/raycrash1 godot/assets/original/data
 python3 -I godot/tools/extract_ui.py "RaycrashArchive/extracted/source/ATC BIN/bin/data" godot/assets/original
+python3 -I godot/tools/convert_original.py "RaycrashArchive/extracted/source/ATC BIN/bin/data" godot/assets/original
 godot --path godot               # play
 godot --path godot -e            # open in the editor
 godot --headless --path godot -s tests/test_mech_sim.gd   # logic tests
 ```
 
 The converted art and data in `assets/original/` are CodiNET's and are git-ignored. Rebuild them
-with the two tools whenever they are missing. The database extractor exports only game-data
+with the three tools, in that order (the converter reads the other two's output), whenever
+they are missing. The database extractor exports only game-data
 tables (robots, weapons, parts, shop catalogue) and never player, clan, log or billing tables.
 
 Record a scripted demo: `godot --path godot --write-movie out.avi --fixed-fps 30 --quit-after 300 -- autopilot`
@@ -143,13 +144,44 @@ window with `--max-fps 60`, or it runs unthrottled). `--write-movie` records sou
 |---|---|
 | WASD or arrows | Move along the screen axes |
 | Mouse | Aim. The mech turns toward the cursor at its turn rate |
-| 1 / 2 / 3 | Dagger, SR-3, missile launcher (not while firing, a burst is out or a combo plays) |
-| Left click | Attack with the selected weapon. One click, one attack: holding does not repeat |
+| 1 / 2 / 3 / 4 | The body's weapon slots (not while firing, a burst is out, a combo plays or a bow draws) |
+| Left click | Attack with the selected weapon. One click, one attack, except: hold the Heavy Machinegun or Plasma Shock Wave to keep firing; hold the Plasma Bow to charge and let go to shoot; let go of the Cluster Cannon to burst its shells in the air |
 | F | Next lock-on target, with the missile launcher |
 | Right click (hold) | Boost, draining the gauge |
 | + / - | Camera depth. Otherwise it follows the nearest enemy automatically |
 | M | Sound and music on or off (this recreation's own) |
 | Esc | Leave the match |
+
+## Bodies (from `rcPlayer.cpp`, `rcArmor.cpp`, `weapon_parameter.lua`, `character_mapping_parameter.lua`)
+
+Pick the body in the menu, or add `body=<zeid|redkite|gigas|deff|alicia>` after `--` (and
+`dummy=<body>` for the practice target, otherwise a random other body). Each player's body
+travels with their state, so two different bodies can meet.
+
+| Body | Armour | Walk | Slot 1 | Slot 2 | Slot 3 | Slot 4 |
+|---|---|---|---|---|---|---|
+| Zeid | 700 | 108 | Dagger Type 1 | SR-3 | MML Type 1 | EMP Shock Gun (not yet) |
+| Red Kite | 850 | 99 | Dagger Type 1 | Plasma Rifle | Plasma Cannon | Confusing Beam (not yet) |
+| Gigas | 1000 | 89 | Dagger Type 1 | Heavy Machinegun | Cluster Cannon | X-Mine (not yet) |
+| Deff | 900 | 95 | Dagger Type 1 | Arms-Gun | HV Head Beam | Plasma Shock Wave |
+| Alicia | 750 | 102 | Saber Type 1 | Double Hand Gun | Plasma Bow | Plasma Shock Wave |
+
+- **Loadouts:** the database defaults, with the shield taken out and the rest packed into
+  slots 1 to 4 (`Armor::init`). Every body starts on slot 2.
+- **Models:** from `anim04` (the newer models with every boost nozzle, the Zeid included).
+  Each weapon brings its own attack and move clips for that body and its held model:
+  - Deff's Arms-Gun sits in both hands and fires from both.
+  - Alicia's pistols alternate hands and clips.
+  - Alicia's bow is in her left hand with an arrow in the right.
+  - Deff's head beam leaves from `head_dum`.
+- **Damage clips:** each body has its own; Alicia uses Deff's.
+- **Colour schemes:** two alternate schemes per body.
+- **Clips only turn and scale parts.** The original puts every part's position back to the
+  model's own after each clip step (`Character::update_frame_pos`). Alicia's clips were made
+  on a skeleton 2.3 times larger and only fit because of this.
+- **Attack timing:** comes from the length of each weapon's attack clip for that body.
+- **Alicia's Plasma Shock Wave** has no Alicia clips in the original tables, so she keeps her
+  current pose while using it, as the original's empty animation slot would.
 
 ## Weapons (from `weapon_parameter.lua`, `weapon_mode_parameter.lua`, `rcAmmo.cpp`, `rcCombo.cpp`)
 
@@ -178,6 +210,30 @@ selected at the start), slot 3 MML Type 1 (id 4), slot 4 ES Type 1, a shield.
   (0.25 s, power 10; the SR-3 shakes 0.1 s, power 4).
 - **Lock-on HUD:** LOCK ON on your target, or on the screen ring when it is off-screen; a
   marker on other candidates; LOCKED in the centre while someone has locked onto you.
+
+**The other bodies' weapons** (Step 7):
+- **Instant beams** (`collision_type` 4) lay a line from the muzzle and hit anything on it
+  while the shot lives, with no width:
+  - **Plasma Cannon:** 660 units. Pierces, hitting each mech once. Passes through walls. A
+    textured beam grows at the shot's speed and narrows away after.
+  - **HV Head Beam:** 495 units. Follows the head as Deff turns and pierces, hitting again
+    every 0.1 s of contact.
+  - **Heavy Machinegun:** 198 units. Hold to fire 12.5 rounds a second. It hits the first
+    mech on the line, only one round in three can do damage (`is_skip_crash`), and it shows
+    a short tracer.
+- **Cluster Cannon:** a shell that bursts on a hit, a wall, the end of its life, or when you
+  let go of the button.
+  - A direct hit does 52 + 60 to the mech hit.
+  - Everything within 132 units takes 52, less 10% for each tenth of the radius.
+  - Inside a fifth of the radius the damage is ×1.2.
+- **Plasma Bow:** hold to draw, gaining a level every 1.5 s up to 2. Each level adds 20%
+  damage and a larger arrow. A hit stuns for 1 / 1.5 / 2 s (no moving, turning or firing)
+  and shoves the target 200 units along the arrow.
+- **Double Hand Gun:** a magazine of 7. Within it the next attack is ready 0.1 s after the
+  last, and a full 1.7 s reload follows the seventh.
+- **Plasma Shock Wave:** hold to stream 10 rounds a second, each turned up to 30° either
+  way at random, homing weakly (40) on the lock-on target within 600 units.
+- **Saber Type 1:** Alicia's three-swing combo, landing from the start of each swing.
 
 **SR-3 mode 2 is left out on purpose.** Its data exists (`zeid2_mode2`, a 7-shot spray), but
 the shipped client cannot reach it: the F-key handler that would select it is commented out
@@ -234,8 +290,14 @@ parts added to the base stats.
   identifies it as `continuous_time`, the gap between shots.
 - The fire animation length (0.5 s) comes from the converted clip; the original playback rate
   of `.x` animations is assumed to match.
-- The shield (slot 4, ES Type 1, held with Space in the original) and the EMP Shock Gun are
-  not in yet.
+- Shields (held with Space in the original) and three slot-4 weapons (EMP Shock Gun,
+  Confusing Beam, X-Mine) are not in yet; their keys do nothing.
+- A Cluster Cannon burst hurts its own shooter too. No owner exclusion was found in the
+  source (inferred).
+- The bow's charged arrow sizes (`charged_crash_radius` 9 and 12) are used as plain radii
+  (inferred).
+- The original's Plasma Shock Wave range indicator and the Plasma Cannon's beam
+  shrinking timing after a hit are approximations.
 - Command combos (right then click: +14 damage; left, right, click: +30) are not ported;
   plain repeated clicks, which add nothing, are.
 - The particle engine's random rotation seeds, wave trails and `billboard = 3` jitter are not
@@ -268,8 +330,11 @@ scenes/main.tscn
 scripts/original.gd      constants and coordinate mapping, with sources
 scripts/game_data.gd     loads the database export and applies the original conversions
 scripts/mech_sim.gd      movement, boost gauge, facing, rifle: pure logic, tested
-scripts/mech_view.gd     model, retargeted animations, rifle, the original rotation table
-scripts/bullet.gd        SR-3 rounds
+scripts/bodies.gd        the five bodies: models, loadouts, per-weapon clips and held models
+scripts/mech_view.gd     a body's model, retargeted clips, held weapons, the rotation table
+scripts/bullet.gd        projectile rounds: bullets, missiles, shells, arrows
+scripts/beam.gd          instant line weapons and their beams
+scripts/combat.gd        splash, stun and line-hit rules
 scripts/game.gd          modes, networking, rounds, hits, camera, target dummy, autopilot
 scripts/battle_world.gd  scenery and effects: arena, sky, lights, booster flames, hits, wall crash, explosion
 scripts/battle_map.gd    an arena's bounds, start points, lights and the edge bounce
@@ -285,5 +350,5 @@ tools/inspect_import.gd     prints an imported model's tree and clips
 tools/render_poses.gd       renders the mech at several facings
 tools/render_map.gd         renders an arena from above with its walls, bounds and start points
 tools/extract_ui.py         reads the HUD window tables and particle scripts, copies their art
-tests/test_mech_sim.gd      95 checks against the original database values and rules
+tests/test_mech_sim.gd      125 checks against the original database values and rules
 ```

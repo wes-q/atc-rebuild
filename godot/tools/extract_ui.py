@@ -68,7 +68,7 @@ def tokenize(text: str) -> list[tuple[str, str]]:
             continue
         val = m.group()
         if kind == "string":
-            val = val[1:-1]
+            val = val[1:-1].replace("\\\\", "\\").replace("\\'", "'").replace('\\"', '"')
         elif kind == "lstring":
             kind, val = "string", val[2:-2]
         out.append((kind, val))
@@ -339,6 +339,15 @@ def main() -> None:
                 textures += 1
             layer["texture"] = image_key(rel)
     print(f"{len(particles)} particle scripts, {textures} new particle textures")
+
+    # Weapon and weapon-mode tables, and the body colour schemes, as data for the game.
+    tables: dict = {}
+    for name in ("weapon_parameter", "weapon_mode_parameter", "character_mapping_parameter"):
+        src = data_dir / "script" / "parameter" / f"{name}.lua"
+        chunk = Parser(tokenize(src.read_bytes().decode("cp949", errors="replace"))).chunk()
+        tables.update({k: resolve(v, chunk) for k, v in chunk.items() if isinstance(v, (dict, list))})
+    (out_dir / "parameters.json").write_text(json.dumps(tables, ensure_ascii=False, indent=1), encoding="utf-8")
+    print(f"parameter tables: {sorted(tables)[:12]}")
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "particles.json").write_text(json.dumps(particles, indent=1), encoding="utf-8")
     (out_dir / "windows.json").write_text(json.dumps(rename_images(windows), ensure_ascii=False, indent=1), encoding="utf-8")

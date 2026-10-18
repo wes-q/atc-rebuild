@@ -17,7 +17,6 @@ const HOOD_CENTRE := Vector2(400, 300)
 const HOOD_RANGE := 180.0
 ## Team 0 colour for names and markers (Radar::render_name). Every free-for-all player is team 0.
 const TEAM0_COLOR := Color8(93, 235, 136)
-const ZEID_FACE := 1 ## robot type 1
 
 ## Another mech as the HUD needs it.
 class Tracked:
@@ -59,7 +58,7 @@ var _nearest_id := 0
 var lock_target_pos: Variant = null
 var lock_candidates: Array[Vector2] = []
 var locked_on_me := false
-var _weapons_set := false
+var _weapons_set := ""
 
 func _ready() -> void:
 	screen = Control.new()
@@ -167,12 +166,15 @@ func refresh(sim: MechSim, me_name: String, status: String, round_time: float, c
 	if booster == null:
 		overlay.queue_redraw()
 		return
-	if not _weapons_set:
-		_weapons_set = true
-		_initial_weapons(sim.stats.weapons.slice(0, 4))
+	if _weapons_set != sim.body + str(sim.slots.size()):
+		_weapons_set = sim.body + str(sim.slots.size())
+		var ids: Array = []
+		for sl in sim.slots:
+			ids.append(sl.data.id)
+		_initial_weapons(ids)
 	time_update(round_time)
 	booster_update(int(sim.booster_gage), int(sim.energy_max), int(sim.energy_low_line))
-	self_user_state(ZEID_FACE, me_name, maxi(0, sim.life), 1)
+	self_user_state(Bodies.face(sim.body), me_name, maxi(0, sim.life), 1)
 	weapon_update(sim.weapon.id, sim.recharge / sim.weapon.reload, sim.weapon.name, sim.weapon_index)
 	# get_my_ammo_number: -1 (no limit) shows as 0, like the ammo per load.
 	var slot: MechSim.Slot = sim.slots[sim.weapon_index]
@@ -239,10 +241,10 @@ func self_user_state(robot: int, user_name: String, hp: int, level: int) -> void
 	self_state.w("user_name_edit").text_set(user_name, Color8(43, 43, 43))
 	self_state.w("user_level_edit").text_set(str(level), Color8(43, 43, 43))
 
-## OnInitialWeaponUpdate: the four slot icons, by the body's default weapon ids (the Zeid's
-## are 28, 3, 4, 2). Id 28 is past the icon list, so that slot shows no icon, as it did.
+## OnInitialWeaponUpdate: the slot icons, by weapon id. Ids past the icon list (the dagger's
+## 28) show no icon, as they did.
 func _initial_weapons(ids: Array) -> void:
-	for i in 4:
+	for i in mini(4, ids.size()):
 		weapon.w("item_slot_%d_img" % (i + 1)).texture_switch(ids[i])
 		weapon.w("item_slot_%d_img_selete" % (i + 1)).texture_switch(ids[i])
 

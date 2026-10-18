@@ -35,12 +35,9 @@ const ATTACK_TIME := 0.5
 
 ## Weapon slot a mech starts with (rcPlayer::init: weapon_index = WEAPON_2).
 const START_WEAPON := 1
-const WEAPON_TYPE_SHIELD := 5
-## Sword swings play attack clips 2, 3 and 4 of the weapon file; 4 is the last of a combo.
+## Sword swings start at attack clip 2 of the weapon file; each queued swing plays the next clip,
+## timed by that clip's length.
 const SWORD_FIRST_SWING := 2
-const SWORD_LAST_SWING := 4
-## Lengths of those clips in anim03/Dagger.x: the next queued swing starts when one ends.
-const SWORD_SWING_TIMES := [0.467, 0.467, 0.533]
 
 # Map collision (rc_map::update, crashed_with_object, crashed_with_wall; rcPlayer::update).
 const OBJECT_PUSH := 1.0 + 50.0 * 0.2 ## dash to pos + normal + normal * (50 * 0.2)

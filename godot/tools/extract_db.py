@@ -95,14 +95,15 @@ class Backup:
         return found
 
     def scan_rows(self, off: int, fixed_end: int, ncols: int):
-        """Every primary record on the page whose header matches the table's layout."""
+        """Every primary record on the page whose header matches the table's layout. The second
+        status byte may carry bit 0, which WeaponInfo's Saber Type 1 row (id 21) has."""
         d = self.data
         free = struct.unpack_from("<H", d, off + 30)[0] or PAGE
         p = off + 96
         end = off + min(free, PAGE - 2)
         while p < end - 4:
             a, b = d[p], d[p + 1]
-            if (a & 0x0E) == 0 and (a & 0x10) and b == 0 and struct.unpack_from("<H", d, p + 2)[0] == fixed_end:
+            if (a & 0x0E) == 0 and (a & 0x10) and b in (0, 1) and struct.unpack_from("<H", d, p + 2)[0] == fixed_end:
                 if p + fixed_end + 2 <= end and struct.unpack_from("<H", d, p + fixed_end)[0] == ncols:
                     yield p
             p += 1

@@ -1,25 +1,12 @@
 class_name MechView
 extends Node3D
-## Draws a mech with the original Zeid model, its three weapon sets (clips and hand models),
-## the boost nozzles' particle scripts and the sword trail.
+## Draws a mech: the body's model, a clip set and held models for each weapon slot (from
+## Bodies), the boost nozzles' particle scripts and the sword trail.
 ## Placement follows rcPlayer::rotationSet: scale, then the rotation table built in
 ## rcManager.cpp (astRotateMatrixManager), mapped into Godot space.
 
-const MODEL := "res://assets/original/zeid/zeid_model.gltf"
-## Per weapon slot: the attack file (PLAYERANIM_ATTACK1 + slot * 2), the move file (+1) and
-## the model held in R_hand_dum (weapon_parameter.lua: Weapon_28, Weapon_3, Weapon_4).
-const SETS := [
-	{"attack": "res://assets/original/zeid/dagger.gltf", "move": "res://assets/original/zeid/zeid_weapon01_move.gltf", "hand": "res://assets/original/zeid/dagger_model.gltf"},
-	{"attack": "res://assets/original/zeid/zeid_weapon02.gltf", "move": "res://assets/original/zeid/zeid_weapon02_move.gltf", "hand": "res://assets/original/zeid/rifle_sr3.gltf"},
-	{"attack": "res://assets/original/zeid/zeid_weapon03.gltf", "move": "res://assets/original/zeid/zeid_weapon03_move.gltf", "hand": "res://assets/original/zeid/launcher_mml.gltf"},
-]
-## PLAYERANIM_DAMAGE and PLAYERANIM_DAMAGE_ETC (rcPlayer.cpp anim_load for the Zeid).
-const DAMAGE_CLIPS := ["res://assets/original/zeid/zeid_damage01.gltf", "res://assets/original/zeid/zeid_damage02.gltf"]
-## Colour schemes from character_mapping_parameter.lua. Empty keeps the model's own texture.
-const SKINS := ["", "res://assets/original/zeid/zeid_p02.png", "res://assets/original/zeid/zeid_p01.png"]
-## Weapon28_mode1: sword_effect_texture and sword_effect_dist.
+## Weapon28_mode1 / Weapon21_mode1: sword_effect_dist, by weapon id; sword_effect_texture.
 const SWORD_TRAIL_TEXTURE := "res://assets/original/ui/texture/zeid_sword_jan02.png"
-const SWORD_EFFECT_DIST := 80.0
 ## sword_effect_duration's default: how long a trail point stays.
 const SWORD_TRAIL_TIME := 0.2
 
@@ -28,40 +15,75 @@ const G := Basis(Vector3(1, 0, 0), Vector3(0, -1, 0), Vector3(0, 0, -1))
 ## Assimp mirrors .x data on Z when importing. Undo it so the table applies to original data.
 static var flip_import_z := true
 
+var body := "zeid"
+var weapon_ids: Array[int] = []
 var model: Node3D
 var player: AnimationPlayer
-var hands: Array[Node3D] = []
-var muzzles: Array[Node3D] = []
-var sword_frame: Node3D
+## Per slot: the held models (one per hand) and their bullet_start frames.
+var held: Array = []
+var muzzles: Array = []
+## Per slot: whether its clip files exist for this body (Alicia has none for the Shock Wave).
+var has_clips: Array[bool] = []
+var sword_frames: Array = []
 var weapon_slot := Original.START_WEAPON
 ## Particle frames by group: "A0" idle nozzles, "00" boost, "D02" directional, "SHLD" shield.
 var particles: Dictionary = {}
 var _current := ""
 var _trail: SwordTrail
 
-func _init() -> void:
-	model = (load(MODEL) as PackedScene).instantiate()
+func _init(body_name := "zeid") -> void:
+	body = body_name
+	weapon_ids = Bodies.loadout(body)
+	model = (load(Bodies.scene_path(Bodies.MODELS[body])) as PackedScene).instantiate()
 	add_child(model)
 	player = AnimationPlayer.new()
 	model.add_child(player)
 	player.root_node = player.get_path_to(model)
 	var lib := AnimationLibrary.new()
-	for i in SETS.size():
-		_import_clips(lib, SETS[i]["attack"], "w%d_" % i)
-		_import_clips(lib, SETS[i]["move"], "m%d_" % i)
-	for i in DAMAGE_CLIPS.size():
-		_import_clips(lib, DAMAGE_CLIPS[i], "damage%d_" % i)
+	for i in weapon_ids.size():
+		var view := Bodies.weapon_view(body, weapon_ids[i])
+		var attack := Bodies.scene_path(view["attack"])
+		var move := Bodies.scene_path(view["move"])
+		has_clips.append(attack != "")
+		if attack != "":
+			_import_clips(lib, attack, "w%d_" % i)
+		if move != "":
+			_import_clips(lib, move, "m%d_" % i)
+	for i in 2:
+		_import_clips(lib, Bodies.scene_path(Bodies.DAMAGE[body][i]), "damage%d_" % i)
 	player.add_animation_library("", lib)
 	player.playback_default_blend_time = 0.15
 
-	var hand := model.find_child("R_hand_dum", true, false) as Node3D
-	for i in SETS.size():
-		var held := (load(SETS[i]["hand"]) as PackedScene).instantiate() as Node3D
-		hand.add_child(held)
-		hands.append(held)
-		muzzles.append(held.find_child("bullet_start", true, false) as Node3D)
-		ParticleFX.attach_all(held)
-	sword_frame = hands[0].find_child("sword_effect", true, false) as Node3D
+	# Held weapons: weapon_xfile in frame_name_to_attach_weapon, a second copy in L_hand_dum
+	# for number_of_weapon 2, and the bow's arrow in R_hand_dum.
+	for i in weapon_ids.size():
+		var view := Bodies.weapon_view(body, weapon_ids[i])
+		var copies: Array[Node3D] = []
+		var tips: Array[Node3D] = []
+		var held_path := Bodies.scene_path(view["held"])
+		for frame_name in view["hands"]:
+			var frame := model.find_child(frame_name, true, false) as Node3D
+			if frame == null or held_path == "":
+				continue
+			var copy := (load(held_path) as PackedScene).instantiate() as Node3D
+			frame.add_child(copy)
+			ParticleFX.attach_all(copy)
+			copies.append(copy)
+			tips.append(copy.find_child("bullet_start", true, false) as Node3D)
+		if view["arrow_frame"] != "" and Bodies.scene_path(Bodies.ARROW) != "":
+			var arrow_frame := model.find_child(view["arrow_frame"], true, false) as Node3D
+			if arrow_frame:
+				var arrow := (load(Bodies.scene_path(Bodies.ARROW)) as PackedScene).instantiate() as Node3D
+				arrow_frame.add_child(arrow)
+				copies.append(arrow)
+		held.append(copies)
+		muzzles.append(tips)
+		var trail: Node3D = null
+		for c in copies:
+			trail = c.find_child("sword_effect", true, false) as Node3D
+			if trail:
+				break
+		sword_frames.append(trail)
 	particles = ParticleFX.attach_all(model)
 	# rcPlayer init: the idle nozzles run; boost, directional bursts and the shield wait.
 	for group in particles:
@@ -73,10 +95,13 @@ func _init() -> void:
 	_trail = SwordTrail.new()
 	_trail.texture = load(SWORD_TRAIL_TEXTURE) if ResourceLoader.exists(SWORD_TRAIL_TEXTURE) else null
 	add_child(_trail)
-	set_weapon(Original.START_WEAPON, false)
+	set_weapon(mini(Original.START_WEAPON, weapon_ids.size() - 1), false)
 
 ## Copies clips from an animation file onto the model, retargeting tracks by bone name.
 ## The files share the Bip01 rig but not every intermediate node, so paths are rebuilt.
+## Character::update puts every frame's position back to the model's own after each clip
+## step (update_frame_pos), except "_Pelvis": clips only turn and scale the parts. That is
+## what lets Alicia's clips, made on a larger skeleton, fit her model.
 func _import_clips(lib: AnimationLibrary, path: String, prefix: String) -> void:
 	var src := (load(path) as PackedScene).instantiate()
 	var src_player := src.find_children("*", "AnimationPlayer", true, false)[0] as AnimationPlayer
@@ -87,6 +112,9 @@ func _import_clips(lib: AnimationLibrary, path: String, prefix: String) -> void:
 			var bone := str(p.get_name(p.get_name_count() - 1)).strip_edges()
 			var target := model.find_child(bone, true, false)
 			if target == null or target is MeshInstance3D:
+				clip.remove_track(t)
+				continue
+			if clip.track_get_type(t) == Animation.TYPE_POSITION_3D and bone != "_Pelvis":
 				clip.remove_track(t)
 				continue
 			clip.track_set_path(t, NodePath(str(model.get_path_to(target)) + ":" + str(p.get_concatenated_subnames())))
@@ -113,8 +141,11 @@ static func facing_basis(i: int) -> Basis:
 ## over 0.3 s. The original's live bullets for the mech are cleared by the caller.
 func set_weapon(slot: int, animate := true) -> void:
 	weapon_slot = slot
-	for i in hands.size():
-		hands[i].visible = i == slot
+	for i in held.size():
+		for c: Node3D in held[i]:
+			c.visible = i == slot
+	if not has_clips[slot]:
+		return
 	if animate:
 		player.play("w%d_0" % slot, 0.3)
 		_current = "w%d_0" % slot
@@ -128,11 +159,13 @@ func play_stand() -> void:
 func play_move(clip: int) -> void:
 	_play("m%d_%d" % [weapon_slot, clip], true)
 
-## Attack clip: 2 for the guns, 2 to 4 for the sword's swings.
+## Attack clip: 2 for most guns, 2 and up for a sword's swings and the twin pistols' shots.
 func play_attack(clip := Original.ANIM_ATTACK) -> void:
 	_play("w%d_%d" % [weapon_slot, clip], false, true)
-	if weapon_slot == 0:
-		_trail.begin(sword_frame, SWORD_EFFECT_DIST)
+	var frame: Node3D = sword_frames[weapon_slot] if weapon_slot < sword_frames.size() else null
+	if frame:
+		var dist := float(Bodies.mode_param(weapon_ids[weapon_slot]).get("sword_effect_dist", 80))
+		_trail.begin(frame, dist)
 
 func is_attack_playing() -> bool:
 	if not player.is_playing() or not _current.begins_with("w"):
@@ -156,6 +189,40 @@ func play_death() -> void:
 ## True while a hit reaction or the knockout pose is playing, so movement clips wait.
 func is_reacting() -> bool:
 	return _current.begins_with("damage") and player.is_playing()
+
+## A charge weapon's glow (charge_effect1-3 at its charge_effect_frame), swapped as the level
+## rises with a change_charge_effect flash; -1 clears it.
+var _charge_fx: Node3D
+func set_charge(level: int) -> void:
+	if _charge_fx:
+		_charge_fx.queue_free()
+		_charge_fx = null
+	if level < 0 or weapon_slot >= weapon_ids.size():
+		return
+	var wp := Bodies.weapon_param(weapon_ids[weapon_slot])
+	var path := Bodies.scene_path(str(wp.get("charge_effect%d" % (level + 1), "")))
+	var frame_name := str(wp.get("charge_effect_frame", ""))
+	var anchor: Node3D = null
+	for c: Node3D in held[weapon_slot]:
+		anchor = c.find_child(frame_name, true, false) as Node3D if frame_name != "" else null
+		if anchor:
+			break
+	if anchor == null and not (held[weapon_slot] as Array).is_empty():
+		anchor = held[weapon_slot][0]
+	if path == "" or anchor == null:
+		return
+	_charge_fx = (load(path) as PackedScene).instantiate() as Node3D
+	anchor.add_child(_charge_fx)
+	MechView.play_effect(_charge_fx, true)
+	ParticleFX.attach_all(_charge_fx)
+	if level > 0:
+		var flash := Bodies.scene_path(str(wp.get("change_charge_effect", "")))
+		if flash != "":
+			var f := (load(flash) as PackedScene).instantiate() as Node3D
+			anchor.add_child(f)
+			MechView.play_effect(f, false)
+			ParticleFX.attach_all(f, true)
+			f.get_tree().create_timer(1.0).timeout.connect(f.queue_free)
 
 ## start_booster_particle / stop_booster_particle: the "00" nozzles while boosting.
 func set_boost(on: bool) -> void:
@@ -201,19 +268,25 @@ func _play(clip: String, loop: bool, restart := false) -> void:
 	player.play(clip)
 	if restart:
 		player.seek(0.0, true)
-	if not clip.begins_with("w0_") or int(clip.get_slice("_", 1)) < Original.ANIM_ATTACK:
+	if not clip.begins_with("w") or int(clip.get_slice("_", 1)) < Original.ANIM_ATTACK:
 		_trail.end()
 
-## World position of the held weapon's bullet_start frame, projected onto the plane.
-func muzzle_plane_pos() -> Vector2:
-	var m: Node3D = muzzles[weapon_slot] if weapon_slot < muzzles.size() else null
+## World position of a held weapon's bullet_start frame (hand 0 right, 1 left), on the plane.
+func muzzle_plane_pos(hand := 0) -> Vector2:
+	var tips: Array = muzzles[weapon_slot] if weapon_slot < muzzles.size() else []
+	var m: Node3D = tips[mini(hand, tips.size() - 1)] if not tips.is_empty() else null
 	if m == null:
 		return Original.to_plane(global_position)
 	return Original.to_plane(m.global_position)
 
+## How many held copies carry a muzzle for the current weapon.
+func muzzle_count() -> int:
+	return (muzzles[weapon_slot] as Array).size() if weapon_slot < muzzles.size() else 0
+
 ## Swaps the model's texture for one of the original colour schemes.
 func set_skin(index: int) -> void:
-	var path: String = SKINS[index % SKINS.size()]
+	var skins := Bodies.skins(body)
+	var path: String = skins[index % skins.size()]
 	if path == "" or not ResourceLoader.exists(path):
 		return
 	var tex := load(path) as Texture2D

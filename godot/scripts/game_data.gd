@@ -45,12 +45,52 @@ class Weapon:
 	var ammo: int ## -1 when the weapon has no ammo limit
 	var cost_energy: float ## booster gauge spent per bullet or swing (rc_Weapon::update_bullet)
 	var guided_flag: int ## homing strength, 0 for none
+	var collision_type: int ## 1 bullet, 2 arc, 3 cylinder, 4 immediate line
+	var line_distance: float ## collision_line_distance for immediate weapons, in units
+	var is_continuous: bool ## fires while the button is held (Heavy Machinegun, Plasma Shock Wave)
+	var splash_area: float ## splash radius in units
+	var state_action_type: int ## a status effect on the one hit (World::state_change)
+	## weapon_parameter.lua and the first weapon_mode_parameter.lua table for this weapon.
+	var param: Dictionary
+	var mode: Dictionary
 
 	func is_sword() -> bool:
 		return weapon_type == 1
 
+	func is_pierce() -> bool:
+		return weapon_type == 3
+
+	func is_splash() -> bool:
+		return weapon_type == 4
+
+	func is_immediate() -> bool:
+		return collision_type == 4
+
+	## A guided weapon steers only when its mode table turns homing on.
 	func is_guided() -> bool:
-		return guided_flag > 0
+		return guided_flag > 0 and int(mode.get("homing", 0)) == 1
+
+	func is_charge() -> bool:
+		return bool(param.get("charge_weapon", false))
+
+	## Weapons whose behaviour is ported: not yet the EMP Shock Gun, Confusing Beam or X-Mine.
+	func is_supported() -> bool:
+		return id not in [17, 18, 19]
+
+	## weapon_parameter.lua lockon_range x HAHA_SCALE_VAL, or 0 for a weapon without lock-on.
+	func lockon_range() -> float:
+		return float(param.get("lockon_range", 0)) * Original.SCALE
+
+	func lockon_half_angle() -> float:
+		return float(param.get("lockon_angle", 90)) * 0.5
+
+	func mode_num(key: String, fallback := 0.0) -> float:
+		var v: Variant = mode.get(key, fallback)
+		return float(v) if v is float or v is int else fallback
+
+	func param_num(key: String, fallback := 0.0) -> float:
+		var v: Variant = param.get(key, fallback)
+		return float(v) if v is float or v is int else fallback
 
 static func _byte(v: float) -> int:
 	return clampi(int(v), 0, 255)
@@ -114,4 +154,13 @@ static func weapon(id: int) -> Weapon:
 	s.ammo = int(w.ammo) if w.ammo != null and int(w.ammo) > 0 else -1
 	s.cost_energy = _num(w.cost_energy)
 	s.guided_flag = int(_num(w.guided_flag))
+	s.collision_type = int(_num(w.collision_type))
+	# copy_weapon_data_to_net: BYTE(x / 10), then NetWeaponData2::set x HAHA_SCALE_VAL x 1.1, x 10.
+	s.line_distance = _byte(_num(w.collision_line_distance) / 10.0) * Original.VEL_SCALE * 10.0
+	s.is_continuous = int(_num(w.is_continuous)) == 1
+	# Server: BYTE(splash_area / 100); client: x 100, then x HAHA_SCALE_VAL x 1.1.
+	s.splash_area = _byte(_num(w.splaqh_area) / 100.0) * 100.0 * Original.VEL_SCALE
+	s.state_action_type = int(_num(w.state_action_type))
+	s.param = Bodies.weapon_param(id)
+	s.mode = Bodies.mode_param(id)
 	return s

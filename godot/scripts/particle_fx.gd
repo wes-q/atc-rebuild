@@ -20,6 +20,7 @@ const NAME_SEP := "~"
 static var _scripts: Dictionary = {}
 static var _infos: Dictionary = {}
 static var _textures: Dictionary = {}
+static var _NODE_SUFFIX := RegEx.create_from_string("_node(_\\d+)?$")
 
 ## A spray's settings and lookup tables (PSprayInfo).
 class Info:
@@ -86,11 +87,14 @@ static func frames_in(scene: Node) -> Array:
 	var out := []
 	for n in scene.find_children("p*", "Node3D", true, false):
 		var node_name := str(n.name)
-		if not NAME_SEP in node_name or node_name.ends_with("_node") or "_node_" in node_name:
+		if not NAME_SEP in node_name:
 			continue
 		var parts := node_name.substr(1).split(NAME_SEP, true, 1)
 		var group_name := parts[0] if parts[0] != "" else "particle"
-		out.append([n, group_name, parts[1].split(",", false)])
+		# A second frame with the same name comes through the import as "..._node" or
+		# "..._node_<n>"; it runs the same scripts.
+		var scripts_part := _NODE_SUFFIX.sub(parts[1], "")
+		out.append([n, group_name, scripts_part.split(",", false)])
 	return out
 
 ## Adds a ParticleFX under every particle frame of a model. Returns them by group.

@@ -1,7 +1,7 @@
 class_name StartMenu
 extends CanvasLayer
 ## Practice, host or join, and the arena for practice or hosting (the joining player gets the
-## host's). Command-line arguments skip this: -- practice, -- host, -- join <ip>, map=<id>.
+## host's). Command-line arguments skip this: -- practice, -- host, -- join <ip>, map=<id>, body=<name>.
 
 signal practice_chosen
 signal host_chosen
@@ -14,6 +14,9 @@ var _map_ids: Array[String] = []
 
 ## Arena picked in the menu, as a map id.
 var map_id := "space"
+## Body picked in the menu.
+var body_id := "zeid"
+var _body: OptionButton
 
 func _ready() -> void:
 	var shade := ColorRect.new()
@@ -51,6 +54,20 @@ func _ready() -> void:
 	map_row.add_child(_map)
 	select_map(map_id)
 
+	var body_row := HBoxContainer.new()
+	box.add_child(body_row)
+	var body_label := Label.new()
+	body_label.text = "Body"
+	body_label.custom_minimum_size = Vector2(60, 0)
+	body_row.add_child(body_label)
+	_body = OptionButton.new()
+	_body.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	for b in Bodies.NAMES:
+		_body.add_item(Bodies.TITLES[b])
+	_body.item_selected.connect(func(i: int) -> void: body_id = Bodies.NAMES[i])
+	body_row.add_child(_body)
+	select_body(body_id)
+
 	_button(box, "Practice against a target", func() -> void: practice_chosen.emit())
 	_button(box, "Host a match (player 1)", func() -> void: host_chosen.emit())
 
@@ -74,6 +91,11 @@ func _button(parent: Control, text: String, action: Callable) -> void:
 	b.text = text
 	b.pressed.connect(action)
 	parent.add_child(b)
+
+func select_body(id: String) -> void:
+	body_id = id
+	if _body and id in Bodies.NAMES:
+		_body.select(Bodies.NAMES.find(id))
 
 func select_map(id: String) -> void:
 	map_id = id

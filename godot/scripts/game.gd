@@ -20,17 +20,6 @@ extends Node3D
 const PORT := 7777
 const DUMMY_ID := -1
 const NO_TARGET := 0
-## weapon_mode_parameter.lua sound_file, by weapon id: weapon change, hit, each bullet or swing.
-const WEAPON_SOUNDS := {
-	28: ["sound/blade_start", "sound/blade_Hit", "sound/blade_att"],
-	3: ["sound/gun_start", "sound/gun_Hit", "sound/gunfire1"],
-	4: ["sound/missile_start", "sound/missile Hit", "sound/missile_fire"],
-}
-## Weapon_4: lockon_range 1800 x HAHA_SCALE_VAL, lockon_angle 90 (half each side).
-const LOCKON_RANGE := 1800.0 * 0.3
-const LOCKON_HALF_ANGLE := 45.0
-## A sword swing can land between crash_check_time (0.3 s) and the end of its life.
-const SWORD_CHECK_TIME := 0.3
 const RESULT_DELAY := 1.5 ## after the last knockout, so the explosion plays first
 const RESULT_TIME := 6.0 ## results on screen before the next round
 
@@ -39,6 +28,7 @@ class Mech:
 	var slot: int
 	var sim: MechSim
 	var view: MechView
+	var body := "zeid"
 	var local := false
 	## Lock-on target's mech id, 0 for none (LockOnSystem). Sent with the state.
 	var lock_target := 0
@@ -80,6 +70,14 @@ var mode := ""
 var bullets: Array[Bullet] = []
 ## Sword swings still able to land, run on the attacker's machine: [Mech, elapsed, weapon].
 var swings: Array = []
+## Immediate-weapon shots in the air (collision_type 4).
+var beams: Array[Beam] = []
+## The body for practice and hosting or joining, and the practice target's.
+var body_choice := "zeid"
+var dummy_body := ""
+## is_skip_crash rounds fired so far, by shooter (only 1 in skip_crash_count + 1 can hit).
+var _skip_counter := {}
+var _prev_fire_local := false
 var _shake_time := 0.0
 var _shake_power := 0
 var _shake_tick := 0.0
@@ -112,6 +110,12 @@ func _ready() -> void:
 	var map_arg := _arg_str("map=")
 	if map_arg != "":
 		map_choice = map_arg
+	var body_arg := _arg_str("body=")
+	if body_arg in Bodies.NAMES:
+		body_choice = body_arg
+	var dummy_arg := _arg_str("dummy=")
+	if dummy_arg in Bodies.NAMES:
+		dummy_body = dummy_arg
 	hud = Hud.new()
 	sound = GameSound.new()
 	add_child(sound)
@@ -163,6 +167,7 @@ func _show_menu(message: String) -> void:
 		menu.host_chosen.connect(start_host)
 		menu.join_chosen.connect(start_join)
 		menu.select_map(map_choice)
+		menu.select_body(body_choice)
 	menu.visible = true
 	menu.show_message(message)
 
@@ -170,6 +175,7 @@ func _hide_menu() -> void:
 	if menu:
 		menu.visible = false
 		map_choice = menu.map_id
+		body_choice = menu.body_id
 
 ## Builds the arena if it is not the one already showing.
 func _use_map(id: String) -> void:
@@ -223,8 +229,8 @@ func start_practice() -> void:
 	_hide_menu()
 	_use_map(map_choice)
 	local_id = 1
-	_spawn(local_id, 0, true)
-	_spawn(DUMMY_ID, 1, false)
+	_spawn(local_id, 0, true, body_choice)
+	_spawn(DUMMY_ID, 1, false, dummy_body if dummy_body != "" else _random_other_body(body_choice))
 	_status = "Practice on %s. Esc: menu" % map.title
 	_begin_round(1, map.id, _pick_spawns())
 
@@ -240,7 +246,7 @@ func start_host() -> void:
 	_hide_menu()
 	_use_map(map_choice)
 	local_id = multiplayer.get_unique_id()
-	_spawn(local_id, 0, true)
+	_spawn(local_id, 0, true, body_choice)
 	_status = "Hosting %s on %s port %d. Waiting for player 2." % [map.title, ", ".join(_lan_addresses()), PORT]
 
 func start_join(address: String) -> void:
@@ -415,7 +421,7 @@ func _mech_label(m: Mech) -> String:
 
 func _on_connected_to_server() -> void:
 	local_id = multiplayer.get_unique_id()
-	_spawn(local_id, 1, true)
+	_spawn(local_id, 1, true, body_choice)
 	_status = "Connected. You are player 2."
 
 func _on_connection_failed() -> void:
@@ -450,19 +456,32 @@ func _net_state(state: Array) -> void:
 	if not mechs.has(id):
 		_spawn(id, 0 if id == 1 else 1, false)
 	var m: Mech = mechs[id]
+	# The owner's body: rebuild their mech when it differs from what we drew.
+	var body_index := int(state[state.size() - 1])
+	if body_index >= 0 and body_index < Bodies.NAMES.size() and Bodies.NAMES[body_index] != m.body:
+		_respawn_body(m, Bodies.NAMES[body_index])
+	m.lock_target = int(state[state.size() - 2])
 	m.sim.apply_snapshot(state)
-	if state.size() > 13:
-		m.lock_target = int(state[13])
 
 ## A shot, from the shooter's muzzle. Reliable so both screens show every bullet.
 @rpc("any_peer", "call_remote", "reliable")
-func _net_fire(origin: Vector2, deg: int, weapon_id: int, target: int) -> void:
+func _net_fire(origin: Vector2, deg: int, weapon_id: int, target: int, charge: int, clip: int) -> void:
 	var id := multiplayer.get_remote_sender_id()
 	if mechs.has(id):
 		var m: Mech = mechs[id]
-		if not m.view.is_attack_playing():
-			m.view.play_attack()
-		_add_bullet(origin, deg, m, weapon_id, target)
+		if clip >= 0:
+			m.view.play_attack(clip)
+		_launch(origin, deg, m, weapon_id, target, charge)
+
+## A splash shell's owner let go of the button (pt_send_button_up_explosion).
+@rpc("any_peer", "call_remote", "reliable")
+func _net_detonate() -> void:
+	_detonate_shells(multiplayer.get_remote_sender_id())
+
+## A Plasma Bow arrow stunned this machine's mech: the push (StunState) is the victim's own.
+func _stun(m: Mech, charge: int, along: Vector2) -> void:
+	m.sim.stun_time = Combat.bow_stun_time(charge)
+	m.sim.start_dash(m.sim.pos + along.normalized() * Combat.BOW_PUSH)
 
 ## A sword swing on another machine: its clip, trail and sound. The attacker's machine
 ## decides whether it lands (collision_checker 1).
@@ -492,28 +511,50 @@ func _net_hit(attacker: int, amount: int, remaining: int, weapon_id: int) -> voi
 
 # --- Mechs ------------------------------------------------------------------------------
 
-func _spawn(id: int, slot: int, local: bool) -> void:
+func _spawn(id: int, slot: int, local: bool, body := "zeid") -> void:
 	var m := Mech.new()
 	m.id = id
 	m.slot = slot
 	m.local = local
-	m.sim = MechSim.new()
+	mechs[id] = m
+	stats[id] = Stats.new()
+	_build_body(m, body)
 	m.sim.reset_at(_spawn_pos(slot), _spawn_facing(slot))
+	if local:
+		cam_from = Vector3(m.sim.pos.x, -depth, m.sim.pos.y)
+
+## The mech's simulation and model for a body, with their events wired.
+func _build_body(m: Mech, body: String) -> void:
+	m.body = body
+	m.sim = MechSim.new(body)
 	_attach_map(m)
-	m.view = MechView.new()
+	m.view = MechView.new(body)
 	add_child(m.view)
-	m.view.set_skin(slot)
+	m.view.set_skin(m.slot)
 	m.sim.boost_started.connect(func() -> void: sound.play_at("sound/sp_booster", m.sim.pos))
 	m.sim.weapon_changed.connect(func(w: int) -> void: _on_weapon_changed(m, w))
-	if local or id == DUMMY_ID:
+	m.sim.charge_changed.connect(func(level: int) -> void: m.view.set_charge(level))
+	if m.local or m.id == DUMMY_ID:
 		m.sim.fired.connect(func(_o: Vector2, deg: int) -> void: _on_local_fired(m, deg))
 		m.sim.attack_started.connect(func(_w: int) -> void: m.burst_target = m.lock_target)
 		m.sim.swung.connect(func(_w: int, swing: int) -> void: _on_local_swing(m, swing))
-	if local:
+	if m.local:
 		m.sim.wall_crashed.connect(func(at: Vector2, normal: Vector2) -> void: _on_wall_crash(m, at, normal))
-		cam_from = Vector3(m.sim.pos.x, -depth, m.sim.pos.y)
-	mechs[id] = m
-	stats[id] = Stats.new()
+
+## Another player's body arrived: swap the model and simulation, keeping where they are.
+func _respawn_body(m: Mech, body: String) -> void:
+	var at := m.sim.pos
+	var face := m.sim.facing
+	m.view.queue_free()
+	_build_body(m, body)
+	m.sim.reset_at(at, face)
+
+func _random_other_body(body: String) -> String:
+	var others: Array[String] = []
+	for b in Bodies.NAMES:
+		if b != body:
+			others.append(b)
+	return others[randi() % others.size()]
 
 ## rc_map::crashed_with_wall: the wall_crash effect and sound/special_fire at your mech.
 func _on_wall_crash(m: Mech, at: Vector2, normal: Vector2) -> void:
@@ -529,7 +570,7 @@ func _on_weapon_changed(m: Mech, w: int) -> void:
 			bullets[i].queue_free()
 			bullets.remove_at(i)
 	if m.local:
-		sound.play(WEAPON_SOUNDS.get(m.sim.weapon.id, WEAPON_SOUNDS[3])[0])
+		sound.play(Bodies.sounds(m.sim.weapon.id)[0])
 
 ## A swing starts on the attacker's machine: show it, tell the others, start its hit window.
 func _on_local_swing(m: Mech, swing: int) -> void:
@@ -540,7 +581,11 @@ func _on_local_swing(m: Mech, swing: int) -> void:
 
 func _show_swing(m: Mech, swing: int) -> void:
 	m.view.play_attack(swing)
-	sound.play_at(WEAPON_SOUNDS[28][2], m.sim.pos)
+	# on_create_bullet: Alicia's third saber swing plays ali1_att2 instead.
+	var fire_sound: String = Bodies.sounds(m.sim.weapon.id)[2]
+	if m.body == "alicia" and m.sim.weapon_index == 0 and swing == 4:
+		fire_sound = "sound/ali1_att2"
+	sound.play_at(fire_sound, m.sim.pos)
 
 ## rc_bullet::is_crash for a sword: from 0.3 s until its life ends, the first mech (in slot
 ## order) within collision_area of the attacker and inside the arc ahead of its facing is hit,
@@ -554,7 +599,8 @@ func _step_swings(dt: float) -> void:
 		if entry[1] > w.life or attacker.sim.life <= 0 or not mechs.has(attacker.id):
 			swings.remove_at(i)
 			continue
-		if entry[1] < SWORD_CHECK_TIME:
+		# crash_check_time: 0.3 s for the dagger, 0 for the saber.
+		if entry[1] < w.mode_num("crash_check_time"):
 			continue
 		var facing := Original.vec2_from_deg(attacker.sim.facing)
 		for victim: Mech in _mechs_in_slot_order():
@@ -582,16 +628,17 @@ func _step_swings(dt: float) -> void:
 ## F steps to the next candidate.
 func lock_candidates(m: Mech) -> Array[Mech]:
 	var out: Array[Mech] = []
-	if not m.sim.weapon.is_guided() or m.sim.life <= 0:
+	var w := m.sim.weapon
+	if w.lockon_range() <= 0.0 or not w.is_guided() or m.sim.life <= 0:
 		return out
 	var facing := Original.vec2_from_deg(m.sim.facing)
 	for o: Mech in mechs.values():
 		if o == m or o.sim.is_dead_complete:
 			continue
 		var rel := o.sim.pos - m.sim.pos
-		if rel.length() > LOCKON_RANGE or rel.length_squared() < 0.0001:
+		if rel.length() > w.lockon_range() or rel.length_squared() < 0.0001:
 			continue
-		if rad_to_deg(acos(clampf(rel.normalized().dot(facing), -1.0, 1.0))) > LOCKON_HALF_ANGLE:
+		if rad_to_deg(acos(clampf(rel.normalized().dot(facing), -1.0, 1.0))) > w.lockon_half_angle():
 			continue
 		out.append(o)
 	out.sort_custom(func(a: Mech, b: Mech) -> bool: return a.sim.pos.distance_to(m.sim.pos) < b.sim.pos.distance_to(m.sim.pos))
@@ -641,10 +688,16 @@ func _physics_process(dt: float) -> void:
 			var lock_key := Input.is_physical_key_pressed(KEY_F) and can_act
 			_update_lock(m, lock_key and not _prev_lockon_key)
 			_prev_lockon_key = lock_key
+			# button_up_explosion: letting go sets off this mech's splash shells.
+			if _prev_fire_local and not intent.fire:
+				if _detonate_shells(m.id) and _networked():
+					_net_detonate.rpc()
+			_prev_fire_local = intent.fire
 			m.sim.step(intent, dt)
 			if _networked():
 				var state := m.sim.snapshot()
 				state.append(m.lock_target)
+				state.append(Bodies.NAMES.find(m.body))
 				_net_state.rpc(state)
 		elif m.id == DUMMY_ID:
 			var it := MechSim.Intent.new()
@@ -654,6 +707,7 @@ func _physics_process(dt: float) -> void:
 		else:
 			m.sim.step_remote(dt)
 	_step_bullets(dt)
+	_step_beams(dt)
 	_step_swings(dt)
 	_check_round_end()
 	if _end_timer >= 0.0:
@@ -779,24 +833,158 @@ func _mouse_on_plane(m: Mech) -> Vector2:
 
 # --- Shots and hits ---------------------------------------------------------------------
 
+## A round leaves the owner's weapon. number_of_weapon 2: switch_shot alternates the hands
+## and their clips (Double Hand Gun), otherwise both hands fire (Arms-Gun). fire_randomness
+## spreads each round within reverse_range_angle (Plasma Shock Wave).
 func _on_local_fired(m: Mech, deg: int) -> void:
-	if not m.view.is_attack_playing():
-		m.view.play_attack()
-	var origin := m.view.muzzle_plane_pos()
 	var w := m.sim.weapon
-	_add_bullet(origin, deg, m, w.id, m.burst_target)
-	if _networked() and m.local:
-		_net_fire.rpc(origin, deg, w.id, m.burst_target)
+	var hands := maxi(1, m.view.muzzle_count())
+	var shot := m.sim.shot_index
+	var switch_shot := int(w.param_num("switch_shot")) == 1 and hands > 1
+	var clip := Original.ANIM_ATTACK + (shot % 2 if switch_shot else 0)
+	if switch_shot or not m.view.is_attack_playing():
+		m.view.play_attack(clip)
+	else:
+		clip = -1
+	var from_hands: Array[int] = []
+	if switch_shot:
+		from_hands.append(shot % 2)
+	else:
+		for h in hands:
+			from_hands.append(h)
+	for hand in from_hands:
+		var aim := deg
+		if int(w.mode_num("fire_randomness")) == 1:
+			var half := int(w.mode_num("reverse_range_angle", 60)) / 2
+			aim = (deg + randi_range(-half, half) + 360) % 360
+		var origin := m.view.muzzle_plane_pos(hand)
+		var charge := maxi(0, m.sim.charge_level)
+		_launch(origin, aim, m, w.id, m.burst_target, charge)
+		if _networked() and m.local:
+			_net_fire.rpc(origin, aim, w.id, m.burst_target, charge, clip)
+		clip = -1
 
-## A bullet from a weapon; a guided one chases the mech with id target (NO_TARGET: straight).
-func _add_bullet(origin: Vector2, deg: int, shooter: Mech, weapon_id: int, target: int) -> void:
-	sound.play_at(WEAPON_SOUNDS.get(weapon_id, WEAPON_SOUNDS[3])[2], shooter.sim.pos)
+## A shot on this machine: a beam for immediate weapons, otherwise a bullet. A guided bullet
+## chases the mech with id target (NO_TARGET: straight).
+func _launch(origin: Vector2, deg: int, shooter: Mech, weapon_id: int, target: int, charge := 0) -> void:
+	var w := GameData.weapon(weapon_id)
+	sound.play_at(Bodies.sounds(weapon_id)[2], shooter.sim.pos)
+	var start_fx := Bodies.scene_path(str(w.mode.get("bullet_start_xfile", "")))
+	if start_fx != "":
+		BattleWorld.spawn_effect(self, start_fx, BattleWorld.effect_basis(), origin, 1.0)
+	if w.is_immediate():
+		_add_beam(origin, deg, shooter, w)
+		return
 	var b := Bullet.new()
 	add_child(b)
 	var chase: MechSim = (mechs[target] as Mech).sim if target != NO_TARGET and mechs.has(target) else null
-	b.setup(origin, deg, shooter.sim, GameData.weapon(weapon_id), chase)
+	b.setup(origin, deg, shooter.sim, w, chase, charge)
 	b.set_meta("shooter", shooter.id)
 	bullets.append(b)
+
+## An immediate shot. is_skip_crash: only one round in skip_crash_count + 1 can hit. The
+## Heavy Machinegun shows a short-lived tracer (second_gigas.x) instead of a strip.
+func _add_beam(origin: Vector2, deg: int, shooter: Mech, w: GameData.Weapon) -> void:
+	var skip := false
+	if int(w.mode_num("is_skip_crash")) == 1:
+		var n: int = _skip_counter.get(shooter.id, 0)
+		skip = n % (int(w.mode_num("skip_crash_count")) + 1) != 0
+		_skip_counter[shooter.id] = n + 1
+	var beam := Beam.new()
+	add_child(beam)
+	beam.setup(origin, deg, w, shooter.id, skip)
+	beams.append(beam)
+	var model := Bodies.scene_path(str(w.mode.get("bullet_xfile", "")))
+	if model != "":
+		var life := w.mode_num("crash_projectile_life_time", 0.17) if w.id == 10 else w.life
+		var fx := BattleWorld.spawn_effect(self, model, BattleWorld.effect_basis(), origin, life)
+		if fx and w.id == 10:
+			var d := Original.vec2_from_deg(deg)
+			var tw := fx.create_tween()
+			tw.tween_property(fx, "position", Original.to_godot(origin + d * w.bullet_speed * life), life)
+
+## Every machine runs every beam; the mech hit decides its own damage (collision_checker 2).
+func _step_beams(dt: float) -> void:
+	for i in range(beams.size() - 1, -1, -1):
+		var beam := beams[i]
+		var shooter: Mech = mechs.get(beam.shooter_id)
+		var muzzle := beam.start
+		var facing := 0
+		if shooter:
+			muzzle = shooter.view.muzzle_plane_pos()
+			facing = shooter.sim.facing
+		var prev_point := beam.point()
+		if not beam.advance(dt, muzzle, facing):
+			beam.queue_free()
+			beams.remove_at(i)
+			continue
+		if not beam.alive:
+			continue
+		if map and beam.stops_at_walls():
+			var wall: Variant = map.collision.segment_hit(prev_point, beam.point())
+			if wall != null:
+				beam.alive = false
+				BattleWorld.hit_flash(self, wall, Bodies.scene_path(str(beam.weapon.mode.get("bullet_dead_xfile", ""))))
+				continue
+		if beam.skip:
+			continue
+		for victim: Mech in _mechs_in_slot_order():
+			if victim.id == beam.shooter_id or victim.sim.life <= 0:
+				continue
+			if not Combat.line_hits(beam.start, beam.line_end(), victim.sim.pos, victim.sim.crash_radius):
+				continue
+			if beam.pierce():
+				if not beam.register_contact(victim.id, dt):
+					continue
+				BattleWorld.hit_flash(self, victim.sim.pos, Bodies.scene_path(str(beam.weapon.mode.get("bullet_dead_xfile2", ""))))
+			else:
+				beam.alive = false
+				BattleWorld.hit_flash(self, victim.sim.pos, Bodies.scene_path(str(beam.weapon.mode.get("bullet_dead_xfile", ""))))
+			_apply_hit(victim, beam.shooter_id, beam.weapon.damage, beam.weapon.id)
+			if not beam.alive:
+				break
+
+## A hit this machine decides: its own mech, or the practice target.
+func _apply_hit(victim: Mech, attacker: int, amount: int, weapon_id: int) -> void:
+	if not round_active or not (victim.local or victim.id == DUMMY_ID) or victim.sim.life <= 0:
+		return
+	victim.sim.take_damage(amount)
+	_record_hit(victim.id, attacker, amount, victim.sim.life, weapon_id)
+	if _networked() and victim.local:
+		_net_hit.rpc(attacker, amount, victim.sim.life, weapon_id)
+
+## rc_bullet::explosion for a splash shell at a point: every mech within the radius, on the
+## machine that owns it, takes the falloff damage. The shooter is not spared (inferred: no
+## exclusion was found). direct: the mech that took the shell itself, if any.
+func _explode(b: Bullet, at: Vector2, direct: Mech = null) -> void:
+	BattleWorld.hit_flash(self, at, b.boom_scene())
+	var shooter: int = b.get_meta("shooter")
+	var radius := b.weapon.splash_area
+	var splash := b.weapon.mode_num("splash_damage")
+	for m: Mech in mechs.values():
+		if m.sim.life <= 0:
+			continue
+		var d := m.sim.pos.distance_to(at)
+		var amount := 0
+		if m == direct:
+			amount = Combat.splash_direct(splash, b.power, radius, d)
+		else:
+			amount = Combat.splash_falloff(splash, radius, d)
+		if amount > 0:
+			_apply_hit(m, shooter, amount, b.weapon_id)
+
+## Sets off a shooter's live shells that go off on button release. True if any did.
+func _detonate_shells(shooter: int) -> bool:
+	var any := false
+	for i in range(bullets.size() - 1, -1, -1):
+		var b := bullets[i]
+		if int(b.get_meta("shooter")) != shooter or not b.detonates_on_release():
+			continue
+		_explode(b, b.plane_pos)
+		b.queue_free()
+		bullets.remove_at(i)
+		any = true
+	return any
 
 ## Every screen flies every bullet. Damage is decided by whoever owns the mech that was hit:
 ## the local player for their own mech, this machine for the practice dummy. Other screens
@@ -807,15 +995,21 @@ func _step_bullets(dt: float) -> void:
 		var prev := b.plane_pos
 		var alive := b.advance(dt)
 		var shooter: int = b.get_meta("shooter")
-		# A missile that runs out explodes, harmlessly (explosion(true)).
-		if not alive and b.guided > 0:
-			BattleWorld.hit_flash(self, b.plane_pos, b.boom_scene())
+		# A missile or splash shell that runs out explodes (explosion(true)); only splash hurts.
+		if not alive:
+			if b.weapon.is_splash():
+				_explode(b, b.plane_pos)
+			elif b.guided > 0:
+				BattleWorld.hit_flash(self, b.plane_pos, b.boom_scene())
 		# World::update: a bullet that meets a wall stops there (rc_map::is_crashed_with_object).
 		if alive and map:
 			var wall: Variant = map.collision.segment_hit(prev, b.plane_pos)
 			if wall != null:
 				alive = false
-				BattleWorld.hit_flash(self, wall, b.boom_scene())
+				if b.weapon.is_splash():
+					_explode(b, wall)
+				else:
+					BattleWorld.hit_flash(self, wall, b.boom_scene())
 		for m: Mech in mechs.values():
 			if not alive:
 				break
@@ -824,12 +1018,15 @@ func _step_bullets(dt: float) -> void:
 			if not b.hits(m.sim.pos, m.sim.crash_radius):
 				continue
 			alive = false
+			if b.weapon.is_splash():
+				_explode(b, b.plane_pos, m)
+				continue
 			BattleWorld.hit_flash(self, b.plane_pos, b.boom_scene())
-			if round_active and (m.local or m.id == DUMMY_ID):
-				m.sim.take_damage(b.power)
-				_record_hit(m.id, shooter, b.power, m.sim.life, b.weapon_id)
-				if _networked() and m.local:
-					_net_hit.rpc(shooter, b.power, m.sim.life, b.weapon_id)
+			if round_active and (m.local or m.id == DUMMY_ID) and m.sim.life > 0:
+				# World::state_change for the Plasma Bow: stun and push, on the victim's machine.
+				if b.weapon.state_action_type == 3:
+					_stun(m, b.charge, b.dir)
+				_apply_hit(m, shooter, b.power, b.weapon_id)
 		if not alive:
 			b.queue_free()
 			bullets.remove_at(i)
@@ -848,12 +1045,18 @@ func _record_hit(victim_id: int, attacker_id: int, amount: int, remaining: int, 
 	elif stats.has(attacker_id) and attacker_id != victim_id:
 		(stats[attacker_id] as Stats).kills += 1
 	# on_bullet_explosion: the attacker's weapon hit sound at the mech that was hit.
-	sound.play_at(WEAPON_SOUNDS.get(weapon_id, WEAPON_SOUNDS[3])[1], victim.sim.pos)
-	# on_damage: the camera shakes for the one hit, by the attacker's weapon slot.
-	if victim_id == local_id:
-		if weapon_id == 4:
+	sound.play_at(Bodies.sounds(weapon_id)[1], victim.sim.pos)
+	# scar_effect: the bow's caution mark over the one hit.
+	var scar := Bodies.scene_path(str(GameData.weapon(weapon_id).param.get("scar_effect", "")))
+	if scar != "":
+		BattleWorld.spawn_effect(self, scar, BattleWorld.effect_basis(1.0), victim.sim.pos, 1.5)
+	# on_damage: the camera shakes for the one hit, by the attacker's weapon slot (WEAPON_3
+	# 0.25 s at power 10, WEAPON_2 0.1 s at power 4).
+	if victim_id == local_id and mechs.has(attacker_id):
+		var slot := Bodies.loadout((mechs[attacker_id] as Mech).body).find(weapon_id)
+		if slot == 2:
 			_shake(0.25, 10)
-		elif weapon_id == 3:
+		elif slot == 1:
 			_shake(0.1, 4)
 	# World::process_damage: the marker goes 100 units up the plane from your own mech.
 	var me := _local()
@@ -863,7 +1066,7 @@ func _record_hit(victim_id: int, attacker_id: int, amount: int, remaining: int, 
 		BattleWorld.font_marker(self, me.sim.pos + Vector2(0, 100), false)
 	elif attacker_id == local_id:
 		BattleWorld.font_marker(self, me.sim.pos + Vector2(0, 100), true)
-		hud.show_target(Hud.ZEID_FACE, float(maxi(0, remaining)) / float(victim.sim.life_max), _mech_name(victim))
+		hud.show_target(Bodies.face(victim.body), float(maxi(0, remaining)) / float(victim.sim.life_max), _mech_name(victim))
 
 # --- Camera -----------------------------------------------------------------------------
 
@@ -931,15 +1134,19 @@ func _autopilot_intent(m: Mech) -> MechSim.Intent:
 		it.boost = t >= 3.0 and t < 4.5
 		it.fire = t > 1.5
 		return it
-	# Cycle sword, rifle, missiles every 8 s, pressing the key for a few frames.
-	var wanted_slot: int = [1, 0, 2][int(_clock / 8.0) % 3]
+	# Cycle through the usable slots every 8 s, pressing the key for a few frames.
+	var usable: Array[int] = []
+	for i in m.sim.slots.size():
+		if m.sim.slots[i].data.is_supported():
+			usable.append(i)
+	var wanted_slot: int = usable[(int(_clock / 8.0) + 1) % usable.size()]
 	if m.sim.weapon_index != wanted_slot and fmod(_clock, 0.5) < 0.1:
 		it.weapon_key = wanted_slot + 1
 	var to := enemy.sim.pos - m.sim.pos
 	var dist := to.length()
 	it.aim = enemy.sim.pos
 	var w := m.sim.weapon
-	var reach := w.crash_radius * 0.9 if w.is_sword() else (LOCKON_RANGE * 0.8 if w.is_guided() else w.bullet_speed * w.life)
+	var reach := w.crash_radius * 0.9 if w.is_sword() else (w.line_distance * 0.9 if w.is_immediate() else (w.lockon_range() * 0.8 if w.lockon_range() > 0.0 else w.bullet_speed * w.life))
 	var near_d := reach * 0.5 if not w.is_sword() else 0.0
 	var side := 1.0 if fmod(_clock + m.slot * 2.5, 5.0) < 2.5 else -1.0
 	var want := to.normalized() if dist > reach * 0.8 else (-to.normalized() if dist < near_d else Vector2(-to.y, to.x).normalized() * side)
@@ -948,6 +1155,21 @@ func _autopilot_intent(m: Mech) -> MechSim.Intent:
 	it.up = want.y > 0.35
 	it.down = want.y < -0.35
 	it.boost = m.sim.booster_gage > 600.0 and dist > reach * 1.5
-	# Click five times a second while in reach.
-	it.fire = dist < reach and fmod(_clock, 0.2) < 0.1
+	# In reach: hold a continuous weapon, draw a charge weapon for 1.6 s, click the rest five
+	# times a second.
+	if w.is_continuous:
+		it.fire = dist < reach and fmod(_clock, 3.0) < 2.0
+	elif w.is_charge():
+		it.fire = dist < reach and fmod(_clock, 2.0) < 1.6
+	elif int(w.mode_num("button_up_explosion")) == 1:
+		# Hold while the shell flies; let go once it is over the target.
+		var has_shell := false
+		var shell_near := false
+		for b in bullets:
+			if int(b.get_meta("shooter")) == m.id and b.detonates_on_release():
+				has_shell = true
+				shell_near = shell_near or b.plane_pos.distance_to(enemy.sim.pos) < w.splash_area * 0.3
+		it.fire = (has_shell and not shell_near) or (not has_shell and dist < reach and fmod(_clock, 0.5) < 0.25)
+	else:
+		it.fire = dist < reach and fmod(_clock, 0.2) < 0.1
 	return it

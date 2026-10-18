@@ -79,6 +79,8 @@ BGM_LIST = [
 ]
 
 IMAGE_TYPES = {".png", ".jpg", ".jpeg"}
+# Length of every converted clip, by output name: the simulation times attacks from them.
+CLIP_LENGTHS: dict[str, list[float]] = {}
 
 # Colour schemes swapped onto the model at runtime (character_mapping_parameter.lua).
 TEXTURES = [
@@ -188,6 +190,10 @@ def convert(data_dir: pathlib.Path, out_dir: pathlib.Path, rel: str, out_name: s
     else:
         gltf.pop("animations", None)
 
+    # A model with only particle frames has an empty data buffer, which Godot refuses.
+    if all(b.get("byteLength", 0) == 0 for b in gltf.get("buffers", [])) and not gltf.get("bufferViews"):
+        gltf.pop("buffers", None)
+
     # A frame named "p<group>:<script>,<script>" carries particle scripts (Model::frame_create).
     # Godot drops ':' from node names, so it becomes '~' to keep the name readable.
     for node in gltf.get("nodes", []):
@@ -196,6 +202,7 @@ def convert(data_dir: pathlib.Path, out_dir: pathlib.Path, rel: str, out_name: s
             node["name"] = name.replace(":", "~")
 
     out.write_text(json.dumps(gltf, ensure_ascii=False, indent=1), encoding="utf-8")
+    CLIP_LENGTHS[out_name] = [round(max(gltf["accessors"][s["input"]]["max"][0] for s in a["samplers"]), 4) for a in gltf.get("animations", [])]
     anims = [(a.get("name"), len(a["channels"])) for a in gltf.get("animations", [])]
     print(f"{rel} -> {out.relative_to(out_dir)}: {len(gltf['nodes'])} nodes, animations {anims}")
 
@@ -425,6 +432,103 @@ def convert_maps(data_dir: pathlib.Path, out_dir: pathlib.Path) -> None:
     (out_dir / "map" / "maps.json").write_text(json.dumps(index, indent=1), encoding="utf-8")
 
 
+# --- Bodies (rcPlayer::create and each class's init) --------------------------------------
+
+# Battle models load from anim04 (newer than middle_character: more booster frames). Alicia
+# reuses Deff's damage clips.
+BODIES = {
+    "zeid": ("anim04/zeid_model_middle.x", "anim/zeid_damage01.x", "anim/zeid_damage02.x"),
+    "redkite": ("anim04/redkite_model_middle.x", "anim/redkite_damage01.x", "anim/redkite_damage02.x"),
+    "gigas": ("anim04/gigas_model_middle.x", "anim/gigas_damage01.x", "anim/gigas_damage02.x"),
+    "deff": ("anim04/deff_model_middle.x", "anim/deff_damage01.x", "anim/deff_damage02.x"),
+    "alicia": ("anim04/ali_model.x", "anim/deff_damage01.x", "anim/deff_damage02.x"),
+}
+# weapon_parameter.lua field prefixes, by body.
+WEAPON_FIELD_PREFIX = {"zeid": "zeid", "redkite": "redkite", "gigas": "gigas", "deff": "deff", "alicia": "alicia"}
+WEAPON_EFFECT_FIELDS = ("bullet_xfile", "bullet_xfile2", "bullet_xfile3", "bullet_start_xfile", "bullet_dead_xfile",
+                        "bullet_dead_xfile2", "bullet_dead_xfile3", "bullet_dead_xfile4")
+WEAPON_PARAM_FIELDS = ("weapon_xfile", "scar_effect", "charge_effect1", "charge_effect2", "charge_effect3", "change_charge_effect")
+
+
+def x_name(rel: str) -> str:
+    """Where an archive model lands: x/<path, lower case, no extension>, so the game can find
+    any model the original scripts name."""
+    norm = rel.replace("\\", "/").lstrip("./").lower()
+    return "x/" + str(pathlib.PurePosixPath(norm).with_suffix(""))
+
+
+def convert_bodies(data_dir: pathlib.Path, out_dir: pathlib.Path) -> None:
+    params_path = out_dir / "ui" / "parameters.json"
+    robots_path = out_dir / "data" / "RobotInfo.json"
+    weapons_path = out_dir / "data" / "WeaponInfo.json"
+    if not (params_path.exists() and robots_path.exists() and weapons_path.exists()):
+        print("  bodies skipped: run extract_db.py and extract_ui.py first")
+        return
+    params = json.loads(params_path.read_text(encoding="utf-8"))
+    robots = {r["name"].lower(): r for r in json.loads(robots_path.read_text())}
+    weapons = {w["id"]: w for w in json.loads(weapons_path.read_text())}
+    wp, wm = params["weapon_parameter"], params["weapon_mode_parameter"]
+    wanted: set[str] = set()
+    textures: set[str] = set()
+    sounds: set[str] = set()
+    for body, (model, dmg1, dmg2) in BODIES.items():
+        wanted.update([model, dmg1, dmg2])
+        robot = robots[body]
+        for k in ("default_weapon1_id", "default_weapon2_id", "default_weapon3_id", "default_weapon4_id", "default_weapon5_id"):
+            wid = robot.get(k)
+            entry = wp.get(f"Weapon_{wid}") if wid else None
+            if not entry:
+                continue
+            prefix = WEAPON_FIELD_PREFIX[body]
+            for field in (f"{prefix}_animation_xfile", f"{prefix}_move_animation_xfile", *WEAPON_PARAM_FIELDS):
+                if isinstance(entry.get(field), str) and entry[field]:
+                    wanted.add(entry[field])
+            for mode_name in entry.get("mode", [])[:1]:
+                mode = wm.get(mode_name, {})
+                for field in WEAPON_EFFECT_FIELDS:
+                    if isinstance(mode.get(field), str) and mode[field]:
+                        wanted.add(mode[field])
+                for field in ("beam_texture", "sword_effect_texture"):
+                    if isinstance(mode.get(field), str) and mode[field]:
+                        textures.add(mode[field])
+                sounds.update(x for x in mode.get("sound_file", []) if isinstance(x, str))
+        for skin in params["character_mapping_parameter"].get(body, {}).get("mapping_list", []):
+            textures.add(skin)
+    # Alicia's arrow, drawn on R_hand_dum beside the bow (is_arrow; not named in the tables).
+    wanted.add("anim01/ali_hwasal.X")
+    converted = 0
+    for rel in sorted(wanted):
+        norm = rel.replace("\\", "/").lstrip("./")
+        try:
+            find_case_insensitive(data_dir, norm)
+        except FileNotFoundError:
+            print(f"  missing model {norm}")
+            continue
+        convert(data_dir, out_dir, norm, x_name(rel))
+        converted += 1
+    for rel in sorted(textures):
+        norm = rel.replace("\\", "/").lstrip("./")
+        try:
+            src = find_case_insensitive(data_dir, norm)
+        except FileNotFoundError:
+            print(f"  missing texture {norm}")
+            continue
+        dst = out_dir / (x_name(rel) + ".png")
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        to_png(src, dst)
+    for rel in sorted(sounds):
+        name = rel if rel.lower().endswith(".ogg") else rel + ".ogg"
+        try:
+            src = find_case_insensitive(data_dir.parent, name)
+        except FileNotFoundError:
+            print(f"  missing sound {name}")
+            continue
+        dst = out_dir / name.lower()
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        copy_ogg(src, dst)
+    print(f"bodies: {converted} models, {len(textures)} textures, {len(sounds)} sounds")
+
+
 def copy_ogg(src: pathlib.Path, dst: pathlib.Path) -> None:
     """The original encoder (Sonic Foundry OggVorbis Beta 3) wrote a malformed comment tag that
     Godot warns about. ffmpeg remuxes the stream with a clean tag; the audio packets are
@@ -466,6 +570,8 @@ def main() -> None:
         convert(data_dir, out_dir, rel, name)
     convert_maps(data_dir, out_dir)
     copy_audio(data_dir.parent, out_dir)
+    convert_bodies(data_dir, out_dir)
+    (out_dir / "clips.json").write_text(json.dumps(CLIP_LENGTHS, indent=1), encoding="utf-8")
     for rel, name in TEXTURES:
         src = find_case_insensitive(data_dir, rel)
         (out_dir / name).parent.mkdir(parents=True, exist_ok=True)
