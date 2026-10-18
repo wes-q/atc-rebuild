@@ -59,11 +59,17 @@ var kind := ""
 var font_index := 0
 ## DrawText flags from the table's text_format: DT_CENTER, DT_VCENTER, DT_WORDBREAK.
 var text_format: Array = []
+## Pixels from one text line to the next; 0 for the font's own height. The shop's item popup
+## sizes itself at 13 a line, so its texts keep to that.
+var line_height := 0.0
 ## Tooltip text, shown by the front end while the pointer rests here (ToolTipOn).
 var tooltip := ""
 ## Check buttons: drawn with texture 3 while checked.
 var checked := false
 var disabled := false
+## An image window the page listens to (BindWindowEvent on a WINDOW_IMAGEWINDOW): it takes
+## clicks and holds but keeps its picture.
+var clickable := false
 var hovered := false
 var held := false
 ## A push, check or highlight button was let go with the pointer still on it.
@@ -98,6 +104,12 @@ static func create_child(table: String, key: String) -> OriginalUI:
 		push_error("UI window %s.%s is not exported; run tools/extract_ui.py" % [table, key])
 		return OriginalUI.new()
 	return _build(key, kids[key])
+
+## A texture table by name (texture_item_list_part_img and the like), or {}.
+static func table(table_name: String) -> Dictionary:
+	_load_defs()
+	var t: Variant = _defs.get(table_name, {})
+	return t if t is Dictionary else {}
 
 static func available() -> bool:
 	_load_defs()
@@ -171,6 +183,14 @@ static func _build(node_name: String, d: Dictionary) -> OriginalUI:
 		for c in sorted:
 			win.add_child(c)
 	return win
+
+## Window::texture_set and texture_uv_set: one picture, or part of one, as texture 1.
+func picture_set(path: String, uv: Variant = null) -> void:
+	textures = [null, texture(path)]
+	uvs = [null, uv]
+	fixed = true
+	current = 1
+	queue_redraw()
 
 ## Child window by its Lua key, like page.weapon.recharge_img.
 func w(key: String) -> OriginalUI:
@@ -253,7 +273,7 @@ func focus_set() -> void:
 # --- Controls -----------------------------------------------------------------------------
 
 func is_control() -> bool:
-	return kind in ["WINDOW_PUSHBUTTON", "WINDOW_CHECKBUTTON", "WINDOW_HIGHLIGHT_BUTTON", "WINDOW_LISTBOXITEM"] and not disabled
+	return (clickable or kind in ["WINDOW_PUSHBUTTON", "WINDOW_CHECKBUTTON", "WINDOW_HIGHLIGHT_BUTTON", "WINDOW_LISTBOXITEM"]) and not disabled
 
 ## The deepest visible control under a point given in this window's parent space, searching
 ## the last drawn first.
@@ -281,6 +301,8 @@ func _hit_size() -> Vector2:
 
 func mouse_in() -> void:
 	hovered = true
+	if clickable:
+		return
 	match kind:
 		"WINDOW_PUSHBUTTON":
 			texture_switch(3 if held else 2)
@@ -294,6 +316,8 @@ func mouse_in() -> void:
 
 func mouse_out() -> void:
 	hovered = false
+	if clickable:
+		return
 	match kind:
 		"WINDOW_PUSHBUTTON":
 			texture_switch(1)
@@ -305,6 +329,8 @@ func mouse_out() -> void:
 
 func press() -> void:
 	held = true
+	if clickable:
+		return
 	match kind:
 		"WINDOW_PUSHBUTTON":
 			texture_switch(3)
@@ -316,6 +342,10 @@ func release(inside: bool) -> void:
 	if not held:
 		return
 	held = false
+	if clickable:
+		if inside:
+			clicked.emit()
+		return
 	match kind:
 		"WINDOW_PUSHBUTTON":
 			texture_switch(2 if inside else 1)
@@ -389,7 +419,7 @@ func _draw_text() -> void:
 	var lines: PackedStringArray = [text]
 	if text_format.has("DT_WORDBREAK") and width > 0.0:
 		lines = _wrap(font, size, width)
-	var line_h := font.get_height(size)
+	var line_h := line_height if line_height > 0.0 else font.get_height(size)
 	var top := 0.0
 	# DrawText centres vertically only with DT_SINGLELINE; wrapped text starts at the top.
 	if text_format.has("DT_VCENTER") and text_format.has("DT_SINGLELINE") and wsize.y > 0.0:

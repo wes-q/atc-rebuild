@@ -65,6 +65,7 @@ func _init() -> void:
 	test_front_end()
 	test_lan_rooms()
 	test_room_pages()
+	test_shop_page()
 	print("\n%d passed, %d failed" % [passed, failures])
 	quit(1 if failures > 0 else 0)
 
@@ -1276,6 +1277,68 @@ func test_room_pages() -> void:
 	fe.room_exit.connect(func() -> void: exits[0] += 1)
 	fe.go_back()
 	check(exits[0] == 1, "back leaves the room")
+	fe.free()
+	OriginalUI.release_statics()
+	DirAccess.remove_absolute(ProjectSettings.globalize_path("user://test_profile.cfg"))
+
+func test_shop_page() -> void:
+	print("item shop as the garage (page_game_shop)")
+	var fe := FrontEnd.new()
+	fe.profile_path = "user://test_profile.cfg"
+	root.add_child(fe)
+	if fe.screen == null:
+		fe._ready()
+	fe.player_name = "Tester"
+	fe.body = "zeid"
+	fe.loadouts.clear()
+	var views := []
+	fe.shop_view.connect(func(b: String, w: Array, slot: int) -> void: views.append([b, w.duplicate(), slot]))
+	fe.show_shop()
+	var shop := fe.shop
+	check(shop.equipped == Bodies.checked_loadout("zeid", []) and views.size() == 1 and views[0][2] == Original.START_WEAPON,
+		"the shop opens on the body's loadout, the robot holding its start weapon")
+	var items := shop.list_items()
+	var mine := items.filter(func(i: Dictionary) -> bool: return int(i["enable"]) == 0)
+	check(items.size() == Bodies._shop_weapons().size() and not mine.is_empty() and mine.size() < items.size(),
+		"the list shows the whole shop; another body's weapons are marked")
+	var inven := shop.inven_items()
+	var ok := not inven.is_empty()
+	for id in inven:
+		ok = ok and shop.usable(id) and not shop.equipped.has(id)
+	check(ok, "the inventory holds this body's playable weapons that are not equipped")
+	shop.equip()
+	check(fe.popup_root.get_child_count() == 1, "EQUIP with nothing chosen says to choose (text_127)")
+	fe.popup_root.get_child(0).free()
+	var pick: int = inven[0]
+	var slot := shop.slot_of(pick)
+	var old: int = shop.equipped[slot]
+	var cell := shop.root.w("inventory").w("Inven_ItemList").get_child(0) as OriginalUI
+	cell.clicked.emit()
+	check(views.back()[2] == slot and int(views.back()[1][slot]) == pick and shop.equipped[slot] == old,
+		"choosing an inventory weapon shows the robot holding it, without equipping it")
+	shop.equip()
+	check(shop.equipped[slot] == pick and shop.inven_items().has(old) and not shop.inven_items().has(pick),
+		"EQUIP puts it in its slot and the old one back in the inventory")
+	shop.disarm()
+	check(shop.equipped[slot] == old, "DISARM puts the slot's default back")
+	shop.disarm()
+	check(fe.popup_root.get_child_count() == 1, "disarming a default says it failed (text_136)")
+	fe.popup_root.get_child(0).free()
+	var tip := shop.item_tip(3, "SR-3", 1, true, false)
+	check(str(tip["preview"]).contains("DAMAGE %d" % int(GameData.weapon_row(3)["damage"])) and str(tip["info"]) == fe.weapon_text(3)
+		and fe.weapon_text(3).begins_with("Triple-energy gun."), "the item popup: the weapon's data and description")
+	var other := shop.item_tip(5, "Beam Blade", 2, false, false)
+	check(str(other["info"]).ends_with(fe.text("text_125")), "another body's weapon says it cannot be equipped")
+	cell = shop.root.w("inventory").w("Inven_ItemList").get_child(0) as OriginalUI
+	cell.clicked.emit()
+	shop.equip()
+	var kept := shop.equipped.duplicate()
+	shop.root.w("exit_button").clicked.emit()
+	check(fe.page == "main" and fe.loadout("zeid") == kept, "EXIT keeps the loadout and goes back to the channel")
+	fe.loadouts.clear()
+	fe._load_profile()
+	check(fe.loadout("zeid") == kept and fe.loadout("gigas") == Bodies.checked_loadout("gigas", []),
+		"loadouts are saved with the profile, by body")
 	fe.free()
 	OriginalUI.release_statics()
 	DirAccess.remove_absolute(ProjectSettings.globalize_path("user://test_profile.cfg"))

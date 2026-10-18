@@ -39,8 +39,7 @@ The game opens on the original's screens, in English, built from its window tabl
 3. **Main menu:** MATCH, TUTORIAL, ITEM SHOP, CHANNEL, OPTION and EXIT down the left, the
    chat console in the middle (normal, whisper and clan tabs, the chat line, scrolling), the
    channel's player list and the friend and clan lists on the right.
-   - MATCH opens the room list (below). ITEM SHOP opens the classic menu, where the loadout
-     is chosen, until the original shop page (step 15) replaces it. TUTORIAL starts practice.
+   - MATCH opens the room list, ITEM SHOP the shop (both below). TUTORIAL starts practice.
    - CHANNEL opens the channel box, pre-filled "raycrash-"; EXIT goes back to character select.
    - The console shows your own lines and the front end's notices; there is no server to chat
      through yet.
@@ -69,7 +68,45 @@ How it behaves, from the engine:
   menu and character select, and from login it quits.
 
 Open a screen directly for testing: `godot --path godot -- front=character` (or `main`,
-`option`); `-- classic` opens the classic menu.
+`option`, `shop`); `-- classic` opens the classic menu (practice, host, join and the loadout
+in plain Godot controls, kept for testing).
+
+## Item shop as the garage (Step 15, from `page_game_shop.lua`, `res/game_shop_background.lua`
+and the item popup in `main.lua`)
+
+ITEM SHOP opens the original shop page for the body chosen at character select, with its own
+music (BGM 22):
+- **The robot** stands in the middle frame over the shop's starry backdrop (the `item_shop`
+  map's `ui_bg01.x` sky and light values), holding whatever weapon you last chose. Click it to
+  see the weapon's attack. Hold the bottom right of the frame to turn it and the bottom left
+  to zoom: the window table has those spots with no art of their own, so nothing marks them.
+- **Equipped slots** along the bottom: SLOT1 to SLOT4 (sword, gun, heavy, special) and the
+  shield. The body-part, skill, instant and bit slots stay empty.
+- **Item list** (top right): the shop's weapons in its order, six rows at a time with the
+  scroll arrows or the wheel. Another body's weapons are marked red, as the original marked
+  what you could not equip; so are weapons this recreation does not play yet.
+- **Inventory** (bottom right): this body's weapons that are not equipped. Choose one and
+  EQUIP puts it in its slot; the weapon it replaces goes back. Choose an equipped slot and
+  DISARM puts that slot's default back (a slot is never empty in battle).
+- **Item popup:** pointing at a weapon shows the original's popup: its name, ITEM TYPE,
+  DAMAGE, RELOAD TIME, AMMO and COST ENERGY from the database, and its description in green.
+  It sits beside the pointer for the inventory and at (367, 60) for the list, as `main.lua`
+  placed it.
+- **Status panel:** the body's armour, energy, speeds, energy regen, overheat line,
+  acceleration and top speed before and with the chosen item. No weapon changes them.
+- EXIT keeps the loadout with your profile, one loadout per body, and goes back to the
+  channel. Practice and every room you create or join use it.
+
+What is left out or mapped (the shop sold for money on CodiNET's server):
+- Nothing costs anything: every weapon the body can use is already in the inventory, and
+  BUY, SELL, the gift and cubit recharge buttons are hidden. CUBITS and CREDITS show 0. The
+  database export has sell prices but no buy prices, so the list's COST column stays blank.
+- The ARMOR, FM and ETC tabs list nothing: armour parts, FM upgrades, colours and bits are not
+  in yet. UPGRADE (FM) is hidden.
+- The item information box in the middle is hidden, as the shipped script left it: it hides
+  the box when the page opens and never shows it again.
+- The robot's viewing angle and the turn and zoom speeds are this recreation's: the viewer's
+  camera code is not in the archive (inferred).
 
 ## Room list and game room (Step 14, from `page_custom_game.lua`, `page_game_room.lua` and
 the `res/custom_game_*.lua` and `res/game_room_*.lua` window tables)
@@ -272,7 +309,9 @@ target raise its guard whenever it can, `dummy_near=200` starts it that far in f
 For the autopilot: `slot=4` keeps it on one weapon, `autoguard` guards 2 s in every 8, `combos`
 enters both command combos with a sword. For hosting: `players=4` starts the countdown once
 four are in (and again after each battle), `room=<name>` names the room, `tab` keeps the Tab
-panel open. `name=<player>` plays under another name without saving it.
+panel open. `name=<player>` plays under another name without saving it, and
+`profile=<name>` keeps the name, options and loadouts in `user://<name>.cfg` instead of your
+own profile (the demo tools use it). `netlog` lines show each mech's weapons.
 
 ## Controls (as in the original)
 
@@ -364,9 +403,9 @@ Default loadouts (the client's `default_item_info`; the server's `InitEquipItemB
 ## Loadouts (Step 12, from `page_game_shop.lua`, `Shop_List`, the server's `Shop_Joint_Item`
 and `IsEnableEquip`)
 
-Pick each slot's weapon in the menu under the body, or add `loadout=29,37,4,17` after `--`
-(sword, gun, heavy, special). Money and the shop are not ported: everything the original
-sold is available.
+Pick each slot's weapon in the item shop (above), or add `loadout=29,37,4,17` after `--`
+(sword, gun, heavy, special). Money is not ported: everything the original sold is
+available.
 
 - **Four slots by category:** sword, gun, heavy, special, as Shop_List's subtypes 1 to 4.
   A weapon fits one category only, and a slot is never empty: unequipping in the original
@@ -632,7 +671,8 @@ scripts/game.gd          modes, networking, rounds, hits, camera, target dummy, 
 scripts/battle_world.gd  scenery and effects: arena, sky, lights, booster flames, hits, wall crash, explosion
 scripts/battle_map.gd    an arena's bounds, start points, lights and the edge bounce
 scripts/map_collision.gd wall triangles on a plane grid: sphere and segment tests
-scripts/start_menu.gd    the classic practice, host, join and loadout menu (behind ITEM SHOP for now)
+scripts/start_menu.gd    the classic practice, host, join and loadout menu (-- classic, for testing)
+scripts/shop_page.gd     the original item shop page as the garage
 scripts/front_end.gd     the original's login, character select, main menu, options, room list and game room
 scripts/lan_rooms.gd     rooms announced and heard on the local network
 scripts/touch_controls.gd on-screen sticks and buttons for phones
@@ -647,6 +687,7 @@ tools/render_poses.gd       renders the mech at several facings
 tools/render_map.gd         renders an arena from above with its walls, bounds and start points
 tools/ui_demo.gd            drives the front end with synthetic input, for checking it
 tools/room_demo.gd          joins a room another copy hosts, through the room list, with synthetic input
+tools/shop_demo.gd          equips a weapon in the item shop with synthetic input
 tools/extract_ui.py         reads the HUD window tables and particle scripts, copies their art
-tests/test_mech_sim.gd      263 checks against the original database values and rules
+tests/test_mech_sim.gd      275 checks against the original database values and rules
 ```

@@ -14,8 +14,8 @@ extends CanvasLayer
 ##   quick-go name box also takes a host's address. Creating a room hosts it.
 ## - The game room is run by the game (scripts/game.gd), which hands this page what to show
 ##   and hears its buttons through the room_* signals.
-## - Shop leads to the classic menu (loadout) until the shop page (step 15) replaces it.
-##   Tutorial starts practice.
+## - ITEM SHOP opens the shop page as the garage (ShopPage), where each body's loadout is
+##   chosen and kept with the profile. Tutorial starts practice.
 
 signal practice_requested
 signal battle_requested
@@ -30,6 +30,10 @@ signal room_map(step: int)
 signal room_slot(slot: int)
 signal room_chat(line: String)
 signal room_exit
+## The shop page opened or the robot it shows changed: the four weapons and the one in hand.
+signal shop_view(body: String, weapons: Array, slot: int)
+## The shop's viewer was clicked: the robot plays the weapon's attack.
+signal shop_attack
 
 const BGM_MENU := 3 ## "Good Luck (Ver2)", from login through the rooms (play_sound_bgm_lua(3))
 ## Where the name, body and options are kept between runs.
@@ -80,6 +84,11 @@ var _status_filter := 0
 var _list_page := 0
 var _list_selected := ""
 var _list_click := ["", -1.0]
+## Each body's chosen weapons, by body name (kept with the profile).
+var loadouts := {}
+## The shop page while it is open.
+var shop: ShopPage
+const BGM_SHOP := 22 ## play_sound_bgm_lua(22) in page_game_shop:create
 ## What the game room shows (game.gd's _room_view).
 var room_view := {}
 ## The number the room list gave the room being joined (1 for a typed address).
@@ -133,17 +142,33 @@ func _load_profile() -> void:
 		player_name = str(cfg.get_value("player", "name", ""))
 		body = str(cfg.get_value("player", "body", "zeid"))
 		tooltips_on = bool(cfg.get_value("options", "tooltips", true))
+		loadouts.clear()
+		for b in Bodies.NAMES:
+			var saved: Variant = cfg.get_value("loadout", b, [])
+			if saved is Array and not (saved as Array).is_empty():
+				loadouts[b] = saved
 		if sound:
 			sound.music_volume = float(cfg.get_value("options", "bgm", 1.0))
 			sound.effects_volume = float(cfg.get_value("options", "effect", 1.0))
 	if not body in Bodies.NAMES:
 		body = "zeid"
 
+## A body's weapons as chosen in the shop, or its defaults.
+func loadout(body_name: String) -> Array[int]:
+	return Bodies.checked_loadout(body_name, loadouts.get(body_name, Bodies.DEFAULTS[body_name].slice(0, 4)))
+
+## char_info.weapon_item: a weapon's description in the shop.
+func weapon_text(id: int) -> String:
+	var items: Dictionary = _texts.get("game_text_new_version", {}).get("char_info", {}).get("weapon_item", {})
+	return str(items.get(str(id), "")).replace("\r\n", "\n").strip_edges()
+
 func save_profile() -> void:
 	var cfg := ConfigFile.new()
 	cfg.set_value("player", "name", player_name)
 	cfg.set_value("player", "body", body)
 	cfg.set_value("options", "tooltips", tooltips_on)
+	for b in loadouts:
+		cfg.set_value("loadout", b, Array(loadouts[b]))
 	if sound:
 		cfg.set_value("options", "bgm", sound.music_volume)
 		cfg.set_value("options", "effect", sound.effects_volume)
@@ -162,6 +187,7 @@ func set_shown(on: bool) -> void:
 func _clear() -> void:
 	if page == "room_list" and lan:
 		lan.stop_listening()
+	shop = null
 	for c in page_root.get_children():
 		c.queue_free()
 	for c in popup_root.get_children():
@@ -306,7 +332,7 @@ func show_main_menu(notice := "") -> void:
 	_clear()
 	set_shown(true)
 	page = "main"
-	if sound and not sound.is_playing_bgm():
+	if sound and (not sound.is_playing_bgm() or sound.current_bgm != BGM_MENU):
 		sound.play_bgm(BGM_MENU)
 	_add("res_dlg_main_menu_background")
 	var stack := _add("res_dlg_main_menu_Propertybutton")
@@ -319,7 +345,9 @@ func show_main_menu(notice := "") -> void:
 		battle_requested.emit()
 		show_room_list())
 	stack.w("tutorial_button").clicked.connect(func() -> void: practice_requested.emit())
-	stack.w("shop_button").clicked.connect(func() -> void: shop_requested.emit())
+	stack.w("shop_button").clicked.connect(func() -> void:
+		shop_requested.emit()
+		show_shop())
 	stack.w("channel_button").clicked.connect(_channel_popup)
 	stack.w("option_button").clicked.connect(show_options)
 	stack.w("exit_button").clicked.connect(show_character)
@@ -883,6 +911,28 @@ func update_game_room(view: Dictionary) -> void:
 		info.w("start_loading").texture_switch(1)
 		info.w("ping_img").texture_switch(1)
 
+# --- Item shop (page_game_shop) --------------------------------------------------------------
+
+## The item shop as the garage for the body chosen at character select (ShopPage).
+func show_shop() -> void:
+	_clear()
+	set_shown(true)
+	page = "shop"
+	if sound:
+		sound.play_bgm(BGM_SHOP)
+	shop = ShopPage.new(self, body, loadout(body))
+	shop.preview.connect(func(weapons: Array, slot: int) -> void: shop_view.emit(body, weapons, slot))
+	shop.attack.connect(func() -> void: shop_attack.emit())
+	shop.closed.connect(_close_shop)
+	shop.build(_add("res_dlg_game_shop_background"))
+
+## handle_game_shop_exit_ack: the loadout is kept and the channel (main menu) comes back.
+func _close_shop() -> void:
+	if shop:
+		loadouts[body] = Array(shop.equipped)
+		save_profile()
+	show_main_menu()
+
 ## Android's back button: close a popup, else step back a page; from login, quit.
 func go_back() -> void:
 	for i in range(popup_root.get_child_count() - 1, -1, -1):
@@ -898,6 +948,8 @@ func go_back() -> void:
 			show_character()
 		"room_list":
 			show_main_menu()
+		"shop":
+			_close_shop()
 		"room":
 			room_exit.emit()
 		"character":
@@ -924,11 +976,37 @@ func message(msg: String, done: Callable = Callable()) -> void:
 
 func _show_tooltip(win: OriginalUI, at: Vector2) -> void:
 	_hide_tooltip()
+	if win.has_meta("item_tip"):
+		_show_item_tip(win.get_meta("item_tip"), at)
+		return
 	if not tooltips_on or win.tooltip == "":
 		return
 	_tooltip = OriginalUI.create("res_tool_tip_on")
 	_tooltip.position = at + Vector2(-50, -80)
 	_tooltip.w("tool_tip_text").text_set(win.tooltip)
+	popup_root.add_child(_tooltip)
+
+## ToolTipOnEventHandler and ToolTipWindowUpdate: the shop's item popup, 180 wide and as tall
+## as its text at 13 pixels a line, by the pointer for the inventory and at (367, 60)
+## otherwise. GetLineCount is not in the archive; lines are counted by their breaks (inferred).
+func _show_item_tip(tip: Dictionary, at: Vector2) -> void:
+	_tooltip = OriginalUI.create("res_tool_tip_on_new")
+	var preview_h := 13.0 * str(tip["preview"]).split("\n").size()
+	var info_h := 13.0 * str(tip["info"]).split("\n").size()
+	var size_y := info_h + preview_h + 30.0
+	_tooltip.w("texture_center").size_set(180, size_y)
+	_tooltip.w("texture_down").pos_set(0, size_y + 6)
+	_tooltip.w("item_name_text").text_set(str(tip["name"]), Color8(17, 155, 234))
+	for k in ["item_preview_text", "item_info_text"]:
+		_tooltip.w(k).line_height = 13.0
+	var preview := _tooltip.w("item_preview_text")
+	preview.size_set(180, preview_h)
+	preview.text_set(str(tip["preview"]), Color8(200, 200, 200))
+	var info := _tooltip.w("item_info_text")
+	info.pos_set(0, 35 + preview_h)
+	info.size_set(180, info_h)
+	info.text_set(str(tip["info"]), Color8(40, 255, 126))
+	_tooltip.position = at - Vector2(250, 80) if bool(tip["inven"]) else Vector2(367, 60)
 	popup_root.add_child(_tooltip)
 
 func _hide_tooltip() -> void:
@@ -978,8 +1056,11 @@ func _input(event: InputEvent) -> void:
 	elif event is InputEventMouseButton:
 		var mb := event as InputEventMouseButton
 		if mb.button_index != MOUSE_BUTTON_LEFT:
-			if mb.pressed and page in ["main", "room"] and (mb.button_index == MOUSE_BUTTON_WHEEL_UP or mb.button_index == MOUSE_BUTTON_WHEEL_DOWN):
+			var wheel := mb.button_index == MOUSE_BUTTON_WHEEL_UP or mb.button_index == MOUSE_BUTTON_WHEEL_DOWN
+			if mb.pressed and wheel and page in ["main", "room"]:
 				_scroll_console(1 if mb.button_index == MOUSE_BUTTON_WHEEL_UP else -1)
+			elif mb.pressed and wheel and shop:
+				shop.wheel(_to_page(mb.position), -1 if mb.button_index == MOUSE_BUTTON_WHEEL_UP else 1)
 			return
 		var p := _to_page(mb.position)
 		if mb.pressed:
@@ -1040,6 +1121,8 @@ func _process(dt: float) -> void:
 			_cursor_time = -1.0
 			frame = 0
 		_apply_cursor(frame)
+	if shop:
+		shop.update_held()
 	if _turntable and is_instance_valid(_turntable):
 		_turn_time = fmod(_turn_time + dt, TURNTABLE_TIME)
 		var frames := _turntable.textures.size() - 1

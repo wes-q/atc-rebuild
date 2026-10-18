@@ -34,6 +34,8 @@ ASSETS = [
     ("weapon/wall_crash.X", "fx/wall_crash"),
     ("weapon/font_hit.X", "fx/font_hit"),
     ("weapon/font_damage.X", "fx/font_damage"),
+    # The item shop's sky (test_map.lua item_shop): the backdrop behind the shop page.
+    ("map/map01/ui_bg01.X", "map/shop/ui_bg01"),
     # Slot 1, Dagger Type 1 (Weapon_28): its swing clips, the Zeid's sword stance moves, the blade.
     ("anim03/Dagger.x", "zeid/dagger"),
     ("middle_character/zeid/zeid_weapon01_middle.x", "zeid/zeid_weapon01"),

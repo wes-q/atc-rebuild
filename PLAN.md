@@ -44,7 +44,7 @@ What the archive contains: `docs/archive-inventory.md`.
 | 12 | Loadouts: four weapon slots by category, the original defaults, 33 weapons | Done |
 | 13 | The original front end: its controls, login (player name), character select, main menu, options | Done |
 | 14 | The original room list and game room, with LAN discovery | Done |
-| 15 | The original shop page as the garage | Next |
+| 15 | The original shop page as the garage | Done |
 
 ## History
 

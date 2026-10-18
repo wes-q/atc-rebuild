@@ -107,11 +107,23 @@ static func _load(table: String) -> Array:
 		return []
 	return JSON.parse_string(text)
 
-static func robot(name: String) -> Robot:
+## A WeaponInfo row as the database has it (the shop's item popup shows these).
+static var _weapon_rows: Dictionary = {}
+static func weapon_row(id: int) -> Dictionary:
+	if _weapon_rows.is_empty():
+		for row in _load("WeaponInfo"):
+			_weapon_rows[int(row.get("id", 0))] = row
+	return _weapon_rows.get(id, {})
+
+## A body's RobotInfo row as the database has it (the shop's status panel shows these).
+static func robot_row(name: String) -> Dictionary:
 	if _robots.is_empty():
 		for row in _load("RobotInfo"):
 			_robots[str(row.name).to_lower()] = row
-	var r: Dictionary = _robots[name.to_lower()]
+	return _robots.get(name.to_lower(), {})
+
+static func robot(name: String) -> Robot:
+	var r: Dictionary = robot_row(name)
 	var s := Robot.new()
 	s.name = r.name
 	var vel_scale := Original.VEL_SCALE

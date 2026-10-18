@@ -205,6 +205,10 @@ func _ready() -> void:
 	sound.enabled = not OS.get_cmdline_user_args().has("mute")
 	front = FrontEnd.new()
 	front.sound = sound
+	# Test option "profile=<name>": keep the name, body, options and loadouts in
+	# user://<name>.cfg instead of the player's own profile.
+	if _arg_str("profile=") != "":
+		front.profile_path = "user://%s.cfg" % _arg_str("profile=")
 	front.visible = false
 	add_child(front)
 	front._load_profile()
@@ -213,13 +217,21 @@ func _ready() -> void:
 		front.player_name = _arg_str("name=")
 	if _arg_str("body=") == "":
 		body_choice = front.body
+	if _arg_str("loadout=") == "":
+		loadout_choice = front.loadout(body_choice)
 	front.practice_requested.connect(func() -> void:
-		body_choice = front.body
+		_take_front_choices()
 		start_practice())
-	front.shop_requested.connect(func() -> void: _show_classic(""))
+	front.shop_view.connect(_shop_stage)
+	front.shop_attack.connect(func() -> void:
+		if _shop_robot:
+			_shop_robot.play_attack())
 	front.room_create.connect(func(n: String, pw: String, teams: bool, beginner: bool) -> void:
+		_take_front_choices()
 		start_host(n, pw, teams, beginner))
-	front.room_join.connect(func(address: String, pw: String) -> void: start_join(address, pw))
+	front.room_join.connect(func(address: String, pw: String) -> void:
+		_take_front_choices()
+		start_join(address, pw))
 	front.room_start.connect(_try_start)
 	front.room_map.connect(_change_map)
 	front.room_slot.connect(_ask_slot)
@@ -256,8 +268,17 @@ func _ready() -> void:
 			"option":
 				front.set_shown(true)
 				front.show_options()
+			"shop":
+				front.show_shop()
 			_:
 				front.show_login()
+
+## The body from character select and its loadout from the shop (loadout= on the command
+## line wins).
+func _take_front_choices() -> void:
+	body_choice = front.body
+	if _arg_str("loadout=") == "":
+		loadout_choice = front.loadout(body_choice)
 
 static func _arg_str(prefix: String) -> String:
 	for a in OS.get_cmdline_user_args():
@@ -289,6 +310,99 @@ func _show_menu(message: String) -> void:
 		touch.visible = false
 	_menu_backdrop()
 	front.show_main_menu(message)
+
+# --- Item shop stage (page_game_shop) -------------------------------------------------------
+
+## The item shop's 3D scene behind its page: the item_shop map's sky (map01/ui_bg01.x) and
+## lights, and the robot holding the chosen weapon. The page's middle frame is see-through;
+## the robot stands in it. The original's viewer camera is not in the archive, so the view
+## (from the battle camera's side, tilted toward you, turned by the rotate buttons) is this
+## recreation's (inferred).
+const SHOP_SKY := "res://assets/original/map/shop/ui_bg01.gltf"
+## test_map.lua item_shop init: diffuse 2.0, ambient 0.4, direction (-1, -1.2, -1).
+const SHOP_DIFFUSE := 2.0
+const SHOP_AMBIENT := 0.4
+const SHOP_LIGHT_DIR := Vector3(-1.0, -1.2, -1.0)
+## The robot's place on the 800x600 page: the middle of the viewer frame (17, 59, 494 x 517).
+const SHOP_ROBOT_AT := Vector2(264, 300)
+const SHOP_CAMERA_DISTANCE := 150.0
+const SHOP_TILT := -20.0 ## degrees the robot leans toward the camera
+const SHOP_FACING := 200 ## the battle facing it is shown from
+const SHOP_TURN_SPEED := 90.0 ## degrees a second while a rotate button is held
+const SHOP_ZOOM_SPEED := 120.0 ## units a second while a zoom button is held
+var _shop_robot: MechView
+var _shop_sky: Node3D
+var _shop_yaw := 0.0
+var _shop_distance := SHOP_CAMERA_DISTANCE
+var _shop_saved_light := []
+
+## The shop page's robot, rebuilt when the weapons change.
+func _shop_stage(body: String, weapons: Array, slot: int) -> void:
+	if _shop_sky == null:
+		_shop_enter()
+	var ids := Bodies.loadout(body, weapons)
+	if _shop_robot == null or _shop_robot.body != body or _shop_robot.weapon_ids != ids:
+		if _shop_robot:
+			_shop_robot.queue_free()
+		_shop_robot = MechView.new(body, ids)
+		add_child(_shop_robot)
+	_shop_robot.set_weapon(slot)
+
+func _shop_enter() -> void:
+	if map_node:
+		for c in map_node.get_children():
+			(c as Node3D).visible = false
+	_shop_sky = (load(SHOP_SKY) as PackedScene).instantiate() as Node3D if ResourceLoader.exists(SHOP_SKY) else Node3D.new()
+	add_child(_shop_sky)
+	BattleWorld.apply_frame_flags(_shop_sky, true)
+	MechView.play_effect(_shop_sky, true)
+	_shop_saved_light = [sun.transform, sun.light_color, sun.light_energy,
+		env.environment.ambient_light_color, env.environment.ambient_light_energy]
+	var d := SHOP_LIGHT_DIR
+	var dir := Vector3(d.x, -d.y, -d.z).normalized()
+	sun.look_at_from_position(Vector3.ZERO, dir, Vector3(0, 0, -1))
+	sun.light_color = Color.WHITE
+	sun.light_energy = SHOP_DIFFUSE * BattleWorld.LIGHT_SCALE
+	env.environment.ambient_light_color = Color(SHOP_AMBIENT, SHOP_AMBIENT, SHOP_AMBIENT)
+	env.environment.ambient_light_energy = BattleWorld.AMBIENT_SCALE
+	_shop_yaw = 0.0
+	_shop_distance = SHOP_CAMERA_DISTANCE
+
+## Out of the shop: the robot and sky go, the lights and the menus' backdrop come back.
+func _shop_leave() -> void:
+	if _shop_robot:
+		_shop_robot.queue_free()
+		_shop_robot = null
+	_shop_sky.queue_free()
+	_shop_sky = null
+	sun.transform = _shop_saved_light[0]
+	sun.light_color = _shop_saved_light[1]
+	sun.light_energy = _shop_saved_light[2]
+	env.environment.ambient_light_color = _shop_saved_light[3]
+	env.environment.ambient_light_energy = _shop_saved_light[4]
+	if mode == "":
+		_menu_backdrop()
+
+## Every frame in the shop: the camera, and the robot turned and placed in the viewer frame.
+func _shop_frame(dt: float) -> void:
+	if front.page != "shop" or not front.visible:
+		_shop_leave()
+		return
+	if front.shop:
+		_shop_yaw = fmod(_shop_yaw + front.shop.turn * SHOP_TURN_SPEED * dt + 360.0, 360.0)
+		_shop_distance = clampf(_shop_distance - front.shop.zoom * SHOP_ZOOM_SPEED * dt, 70.0, 300.0)
+	camera.position = Vector3(0, _shop_distance, 0)
+	camera.look_at(Vector3.ZERO, Vector3(0, 0, -1))
+	BattleWorld.place_sky(_shop_sky, camera)
+	if _shop_robot:
+		var px := front.screen.position + SHOP_ROBOT_AT * front.screen.scale
+		_shop_robot.position = camera.project_position(px, _shop_distance)
+		# The battle pose seen from above, stood up a quarter turn about the screen's upright
+		# axis, turned about that axis by the rotate buttons and leaned toward the camera.
+		var stand := Basis(Vector3(0, 0, 1), deg_to_rad(_shop_yaw - 90.0))
+		_shop_robot.model.transform = Transform3D(Basis(Vector3.RIGHT, deg_to_rad(SHOP_TILT)) * stand * MechView.facing_basis(SHOP_FACING), Vector3.ZERO)
+		if not _shop_robot.is_attack_playing() and not _shop_robot.is_drawing():
+			_shop_robot.play_stand()
 
 ## Behind the front end: the space map's sky alone, seen from 320 units up (the menus'
 ## interface_map loads map01's skymap and no objects; the camera sits at (0, -320, 0)).
@@ -1447,7 +1561,7 @@ func _physics_process(dt: float) -> void:
 			for m: Mech in mechs.values():
 				var flags := (" G" if m.sim.guarding else "") + (" C" if m.sim.is_confused() else "") + (" J" if m.local and hud.jam_time > 0.0 else "") \
 					+ (" P" if m.sim.is_pulse() else "") + (" D%d" % m.sim.damage_stacks.size() if not m.sim.damage_stacks.is_empty() else "")
-				parts.append("%s%d s%d t%d %s pos=(%d,%d) hp=%d sh=%d%s" % ["me" if m.local else "peer", m.id, m.slot, m.team, m.body, m.sim.pos.x, m.sim.pos.y, m.sim.life, m.sim.durability, flags])
+				parts.append("%s%d s%d t%d %s%s pos=(%d,%d) hp=%d sh=%d%s" % ["me" if m.local else "peer", m.id, m.slot, m.team, m.body, str(m.weapons).replace(" ", ""), m.sim.pos.x, m.sim.pos.y, m.sim.life, m.sim.durability, flags])
 			var mines := 0
 			var lying := 0
 			for bl in bullets:
@@ -1459,6 +1573,8 @@ func _physics_process(dt: float) -> void:
 			print("[%s r%d %s f%d] " % [mode, round_number, "on" if round_active else "off", _capture_index], "  ".join(parts))
 
 func _process(dt: float) -> void:
+	if _shop_sky:
+		_shop_frame(dt)
 	var me := _local()
 	# In the game room the page covers the battle; the mechs stay put away until it starts.
 	hud.visible = not _in_room
