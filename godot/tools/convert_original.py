@@ -160,13 +160,87 @@ def with_tick_rate(src: pathlib.Path, work: pathlib.Path) -> pathlib.Path:
     return patched
 
 
+def export_clips_only(src: pathlib.Path, out: pathlib.Path, work: pathlib.Path) -> list[str]:
+    """Assimp's glTF exporter crashes on a file whose clips animate frames the file does not
+    have (anim03/g_napalm.x moves Sky01 and Sky02). Its JSON dump works, so this writes the
+    glTF from that: the frame tree and the clips, without the strays and without meshes.
+    It is only for clip files, whose meshes the game never shows. Returns the dropped tracks."""
+    work.mkdir(parents=True, exist_ok=True)
+    dump = work / (src.stem + ".assjson")
+    subprocess.run(["assimp", "export", str(src), str(dump), "-fassjson"], check=True, capture_output=True)
+    scene = json.loads(dump.read_text(encoding="utf-8", errors="replace"))
+    dump.unlink()
+    nodes: list[dict] = []
+    index: dict[str, int] = {}
+
+    def add(node: dict) -> int:
+        i = len(nodes)
+        m = node.get("transformation", [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1])
+        entry = {"name": node.get("name", ""), "matrix": [m[r * 4 + c] for c in range(4) for r in range(4)]}
+        nodes.append(entry)
+        index.setdefault(entry["name"], i)
+        kids = [add(c) for c in node.get("children", [])]
+        if kids:
+            entry["children"] = kids
+        return i
+
+    root = add(scene["rootnode"])
+    blob = bytearray()
+    accessors: list[dict] = []
+    views: list[dict] = []
+
+    def put(values: list[list[float]], kind: str) -> int:
+        start = len(blob)
+        for v in values:
+            blob.extend(struct.pack(f"<{len(v)}f", *v))
+        views.append({"buffer": 0, "byteOffset": start, "byteLength": len(blob) - start})
+        acc = {"bufferView": len(views) - 1, "componentType": 5126, "count": len(values), "type": kind}
+        if kind == "SCALAR":
+            acc["min"] = [min(v[0] for v in values)]
+            acc["max"] = [max(v[0] for v in values)]
+        accessors.append(acc)
+        return len(accessors) - 1
+
+    animations = []
+    dropped: list[str] = []
+    for n, anim in enumerate(scene.get("animations", [])):
+        tps = float(anim.get("tickspersecond") or 4800.0)
+        channels, samplers = [], []
+        for ch in anim.get("channels", []):
+            if ch["name"] not in index:
+                dropped.append(ch["name"])
+                continue
+            for key, path, kind, fix in (("positionkeys", "translation", "VEC3", lambda v: v),
+                                         ("rotationkeys", "rotation", "VEC4", lambda q: [q[1], q[2], q[3], q[0]]),
+                                         ("scalingkeys", "scale", "VEC3", lambda v: v)):
+                keys = ch.get(key, [])
+                if not keys:
+                    continue
+                times = put([[k[0] / tps] for k in keys], "SCALAR")
+                values = put([fix(k[1]) for k in keys], kind)
+                samplers.append({"input": times, "output": values, "interpolation": "LINEAR"})
+                channels.append({"sampler": len(samplers) - 1, "target": {"node": index[ch["name"]], "path": path}})
+        animations.append({"name": f"anim_{n}", "channels": channels, "samplers": samplers})
+    bin_path = out.with_suffix(".bin")
+    bin_path.write_bytes(bytes(blob))
+    gltf = {"asset": {"version": "2.0", "generator": "convert_original.py export_clips_only"},
+            "scene": 0, "scenes": [{"nodes": [root]}], "nodes": nodes, "animations": animations,
+            "buffers": [{"uri": bin_path.name, "byteLength": len(blob)}], "bufferViews": views, "accessors": accessors}
+    out.write_text(json.dumps(gltf), encoding="utf-8")
+    return sorted(set(dropped))
+
+
 def convert(data_dir: pathlib.Path, out_dir: pathlib.Path, rel: str, out_name: str) -> None:
     src = find_case_insensitive(data_dir, rel)
     out = out_dir / f"{out_name}.gltf"
     out.parent.mkdir(parents=True, exist_ok=True)
     work = out_dir / ".work"
     readable = with_tick_rate(src, work)
-    subprocess.run(["assimp", "export", str(readable), str(out), "-fgltf2"], check=True, capture_output=True)
+    try:
+        subprocess.run(["assimp", "export", str(readable), str(out), "-fgltf2"], check=True, capture_output=True)
+    except subprocess.CalledProcessError:
+        dropped = export_clips_only(readable, out, work)
+        print(f"  {rel}: assimp's glTF export failed; wrote its clips only, without tracks for {dropped}")
     if readable != src:
         readable.unlink()
         print(f"  {rel}: added the missing 4800 ticks-per-second declaration")
