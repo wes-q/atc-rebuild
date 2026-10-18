@@ -51,6 +51,10 @@ func _init() -> void:
 	test_emp()
 	test_mine_firing()
 	test_mine_cycle()
+	test_combo_table()
+	test_combo_keys_follow_facing()
+	test_combo_input()
+	test_combo_swings()
 	print("\n%d passed, %d failed" % [passed, failures])
 	quit(1 if failures > 0 else 0)
 
@@ -801,3 +805,109 @@ func test_mine_cycle() -> void:
 	check(Combat.mine_target(1, Vector2(250, 0), 400, players) == 2, "nearest other player alive and in range")
 	check(Combat.mine_target(1, Vector2(800, 0), 400, players) == 0, "beyond 400 units: none")
 	check(Combat.mine_target(2, Vector2(250, 0), 400, players) == 0, "the owner itself never counts (3 is nearest and dead)")
+
+func test_combo_table() -> void:
+	print("command combos (combo_parameter.lua)")
+	var want := {"zeid": [2, 3], "redkite": [2, 3], "gigas": [2, 3], "deff": [2, 3], "alicia": [10, 11]}
+	var ok := true
+	for body: String in want:
+		var sim := MechSim.new(body)
+		var ids: Array[int] = []
+		for c in sim.combo_commands:
+			ids.append(c.id)
+		ok = ok and ids == Array(want[body], TYPE_INT, "", null)
+	check(ok, "each body's sword registers its two combos (Alicia's saber 10 and 11, the dagger 2 and 3)")
+	var c2 := Bodies.combo_param(2)
+	var c3 := Bodies.combo_param(3)
+	check(c2.damage == 14 and c2.finish == 0 and c3.damage == 30 and c3.finish == 1, "dagger: right, click +14; left, right, click +30, a finisher")
+	check(Bodies.combo_param(10).damage == 15 and Bodies.combo_param(11).damage == 32, "saber: +15 and +32")
+
+func test_combo_keys_follow_facing() -> void:
+	print("combo keys turn with the facing (update_key_info)")
+	var right_key := [false, true, false, false, false, false]
+	var up_key := [false, false, true, false, false, false]
+	var left_key := [true, false, false, false, false, false]
+	var down_key := [false, false, false, true, false, false]
+	var R := MechSim.ComboKey.RIGHT
+	var L := MechSim.ComboKey.LEFT
+	check(MechSim.combo_key_info(right_key, 0)[R] and MechSim.combo_key_info(left_key, 0)[L], "facing right: right is right")
+	check(MechSim.combo_key_info(up_key, 90)[R] and MechSim.combo_key_info(down_key, 90)[L], "facing up: up is right, down is left")
+	check(MechSim.combo_key_info(left_key, 180)[R] and MechSim.combo_key_info(right_key, 180)[L], "facing left: left and right swap")
+	check(MechSim.combo_key_info(down_key, 270)[R] and MechSim.combo_key_info(up_key, 270)[L], "facing down: down is right, up is left")
+	check(not MechSim.combo_key_info(up_key, 0)[R] and not MechSim.combo_key_info(up_key, 0)[MechSim.ComboKey.UP], "up and down never count on their own")
+
+func _tap(sim: MechSim, it: MechSim.Intent, field: String, gap := 2) -> void:
+	it.set(field, true)
+	sim.step(it, DT)
+	it.set(field, false)
+	for i in gap:
+		sim.step(it, DT)
+
+func test_combo_input() -> void:
+	print("combo input (ComboInputManager)")
+	var sim := MechSim.new()
+	sim.dashing = false
+	var it := MechSim.Intent.new()
+	it.aim = Vector2(1000, 0)
+	_tap(sim, it, "right")
+	it.fire = true
+	sim._update_combo_input(it, DT)
+	it.fire = false
+	sim._update_combo_input(it, DT)
+	check(sim.combo_ready == 2, "right then click within 0.2 s: combo 2")
+	sim.take_combo(sim.slots[0].data)
+	sim._update_combo_input(it, DT)
+	it.right = true
+	sim._update_combo_input(it, DT)
+	it.right = false
+	for i in 15:
+		sim._update_combo_input(it, DT)
+	it.fire = true
+	sim._update_combo_input(it, DT)
+	it.fire = false
+	check(sim.combo_ready == 0, "a click 0.25 s after the key is too late")
+	it.left = true
+	sim._update_combo_input(it, DT)
+	it.left = false
+	sim._update_combo_input(it, DT)
+	it.right = true
+	sim._update_combo_input(it, DT)
+	it.right = false
+	sim._update_combo_input(it, DT)
+	it.fire = true
+	sim._update_combo_input(it, DT)
+	it.fire = false
+	check(sim.combo_ready == 3, "left, right, click: combo 3 wins over 2 on the same click")
+	check(sim.take_combo(sim.slots[1].data) == 0, "only the sword's own combos count")
+
+func test_combo_swings() -> void:
+	print("combo swings (combo_shoot, ComboSystem)")
+	var sim := MechSim.new()
+	var it := MechSim.Intent.new()
+	it.aim = Vector2(1000, 0)
+	it.weapon_key = 1
+	run(sim, it, 1.0)
+	it.weapon_key = 0
+	var swings: Array = []
+	sim.swung.connect(func(_w: int, swing: int) -> void: swings.append([swing, sim.swing_combo]))
+	# Facing right: right, click starts the combo with +14.
+	_tap(sim, it, "right", 1)
+	_tap(sim, it, "fire", 3)
+	check(swings.size() == 1 and swings[0] == [2, 2], "the first swing carries combo 2 (%s)" % str(swings))
+	# During the swing: left, right, click queues the finisher.
+	_tap(sim, it, "left", 1)
+	_tap(sim, it, "right", 1)
+	_tap(sim, it, "fire", 1)
+	run(sim, it, 0.6)
+	check(swings.size() == 2 and swings[1] == [3, 3], "the queued swing carries combo 3 (%s)" % str(swings))
+	_tap(sim, it, "fire", 1)
+	run(sim, it, 0.8)
+	check(swings.size() == 2 and not sim.combo_active, "a finisher ends the chain: no third swing")
+	run(sim, it, 1.0)
+	_tap(sim, it, "fire", 1)
+	_tap(sim, it, "fire", 1)
+	run(sim, it, 0.6)
+	check(swings.size() == 4 and swings[2] == [2, 0] and swings[3] == [3, 0], "plain clicks carry nothing (%s)" % str(swings.slice(2)))
+	# The handler holds the sim; let go of it so the sim is freed.
+	for c in sim.swung.get_connections():
+		sim.swung.disconnect(c.callable)

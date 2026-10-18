@@ -24,6 +24,8 @@ const NO_TARGET := 0
 const NO_FROM := Vector2(INF, INF)
 const CHARACTER_BLOCK := "res://assets/original/x/weapon/character_block.gltf"
 const SHIELD_CRASH := "res://assets/original/x/weapon/shield_crash.gltf"
+## The combo flashes have no clip of their own to time them (inferred).
+const COMBO_EFFECT_TIME := 1.0
 const RESULT_DELAY := 1.5 ## after the last knockout, so the explosion plays first
 const RESULT_TIME := 6.0 ## results on screen before the next round
 
@@ -102,6 +104,9 @@ var _netlog := OS.get_cmdline_user_args().has("netlog")
 var _dummy_guard := OS.get_cmdline_user_args().has("dummy_guard")
 ## Autopilot: raise the guard for 2 s of every 8 s weapon cycle.
 var _autoguard := OS.get_cmdline_user_args().has("autoguard")
+## Autopilot: with a sword in reach, enter command combos (forward, click; then back,
+## forward, click for the finisher).
+var _autocombos := OS.get_cmdline_user_args().has("combos")
 ## Test option "hp=<n>": start every mech with n armour points so knockouts come quickly.
 var _test_hp := _arg_int("hp=")
 ## Practice: the target starts this many units in front of you each round (for testing).
@@ -507,10 +512,10 @@ func _stun(m: Mech, charge: int, along: Vector2) -> void:
 ## A sword swing on another machine: its clip, trail and sound. The attacker's machine
 ## decides whether it lands (collision_checker 1).
 @rpc("any_peer", "call_remote", "reliable")
-func _net_swing(swing: int) -> void:
+func _net_swing(swing: int, combo: int) -> void:
 	var id := multiplayer.get_remote_sender_id()
 	if mechs.has(id):
-		_show_swing(mechs[id], swing)
+		_show_swing(mechs[id], swing, combo)
 
 ## A swing from another machine landed on this machine's mech.
 @rpc("any_peer", "call_remote", "reliable")
@@ -589,13 +594,29 @@ func _on_weapon_changed(m: Mech, w: int) -> void:
 
 ## A swing starts on the attacker's machine: show it, tell the others, start its hit window.
 func _on_local_swing(m: Mech, swing: int) -> void:
-	_show_swing(m, swing)
-	swings.append([m, 0.0, m.sim.weapon])
+	var combo := m.sim.swing_combo
+	_show_swing(m, swing, combo)
+	# create_bullet(..., cp->damage): a command combo adds its damage to this swing.
+	swings.append([m, 0.0, m.sim.weapon, int(Bodies.combo_param(combo).get("damage", 0))])
 	if _networked() and m.local:
-		_net_swing.rpc(swing)
+		_net_swing.rpc(swing, combo)
 
-func _show_swing(m: Mech, swing: int) -> void:
+## A command combo's swing also throws effect_name at the mech and rotate_effect_name turned
+## to its facing (pt_recv_shoot / ComboSystem::update).
+func _show_swing(m: Mech, swing: int, combo := 0) -> void:
 	m.view.play_attack(swing)
+	var cp := Bodies.combo_param(combo)
+	if not cp.is_empty():
+		var start := Bodies.scene_path(str(cp.get("effect_name", "")))
+		if start != "":
+			BattleWorld.spawn_effect(self, start, BattleWorld.effect_basis(), m.sim.pos, COMBO_EFFECT_TIME)
+		var turn := Bodies.scene_path(str(cp.get("rotate_effect_name", "")))
+		if turn != "":
+			var life := COMBO_EFFECT_TIME
+			var lengths := Bodies.clip_lengths(str(cp.get("rotate_effect_name", "")))
+			if not lengths.is_empty():
+				life = float(lengths[0])
+			BattleWorld.spawn_effect(self, turn, BattleWorld.facing_effect_basis(m.sim.facing), m.sim.pos, life)
 	# on_create_bullet: Alicia's third saber swing plays ali1_att2 instead.
 	var fire_sound: String = Bodies.sounds(m.sim.weapon.id)[2]
 	if m.body == "alicia" and m.sim.weapon_index == 0 and swing == 4:
@@ -604,12 +625,13 @@ func _show_swing(m: Mech, swing: int) -> void:
 
 ## rc_bullet::is_crash for a sword: from 0.3 s until its life ends, the first mech (in slot
 ## order) within collision_area of the attacker and inside the arc ahead of its facing is hit,
-## once. Damage is the weapon's (plain clicks add no combo bonus).
+## once. Damage is the weapon's plus the swing's command combo bonus (get_damage).
 func _step_swings(dt: float) -> void:
 	for i in range(swings.size() - 1, -1, -1):
 		var entry: Array = swings[i]
 		var attacker: Mech = entry[0]
 		var w: GameData.Weapon = entry[2]
+		var amount: int = w.damage + int(entry[3])
 		entry[1] += dt
 		if entry[1] > w.life or attacker.sim.life <= 0 or not mechs.has(attacker.id):
 			swings.remove_at(i)
@@ -631,9 +653,9 @@ func _step_swings(dt: float) -> void:
 			# The guard test runs where the victim's guard and facing are known for sure.
 			if round_active:
 				if _owns(victim):
-					_apply_hit(victim, attacker.id, w.damage, w.id, attacker.sim.pos)
+					_apply_hit(victim, attacker.id, amount, w.id, attacker.sim.pos)
 				elif _networked():
-					_net_melee_hit.rpc_id(victim.id, w.damage, w.id, attacker.sim.pos)
+					_net_melee_hit.rpc_id(victim.id, amount, w.id, attacker.sim.pos)
 			break
 
 ## LockOnSystem::update for the local mech with a guided weapon: enemies within the range
@@ -1179,6 +1201,8 @@ func _record_hit(victim_id: int, attacker_id: int, amount: int, remaining: int, 
 		return
 	var victim: Mech = mechs[victim_id]
 	victim.sim.life = remaining
+	if _netlog:
+		print("  hit %d -> %d: %d with %s, %d left" % [attacker_id, victim_id, amount, GameData.weapon(weapon_id).name, remaining])
 	if stats.has(attacker_id):
 		(stats[attacker_id] as Stats).damage += amount
 	if remaining > 0:
@@ -1267,6 +1291,28 @@ func _shake_offset(dt: float) -> float:
 
 ## Scripted duel for recordings and checks. With an enemy: close to firing range, strafe
 ## around them with boost bursts, fire when in range. Without one: a walk-boost-fire route.
+## Test driver: a 1.2 s cycle of key taps, each within the original's 0.2 s limit.
+func _combo_keys(it: MechSim.Intent, facing: int, t: float) -> void:
+	var deg := (facing % 360 + 360) % 360
+	var fwd := "right"
+	if deg >= 45 and deg < 135:
+		fwd = "up"
+	elif deg >= 135 and deg < 225:
+		fwd = "left"
+	elif deg >= 225 and deg < 315:
+		fwd = "down"
+	var back: String = {"right": "left", "left": "right", "up": "down", "down": "up"}[fwd]
+	for k in ["left", "right", "up", "down"]:
+		it.set(k, false)
+	it.boost = false
+	it.fire = (t >= 0.10 and t < 0.14) or (t >= 0.37 and t < 0.41)
+	if t >= 0.05 and t < 0.08:
+		it.set(fwd, true)
+	elif t >= 0.25 and t < 0.28:
+		it.set(back, true)
+	elif t >= 0.31 and t < 0.34:
+		it.set(fwd, true)
+
 var _stuck_check := 0.0
 var _stuck_from := Vector2.ZERO
 var _unstick_time := 0.0
@@ -1332,6 +1378,8 @@ func _autopilot_intent(m: Mech) -> MechSim.Intent:
 		it.fire = (has_shell and not shell_near) or (not has_shell and dist < reach and fmod(_clock, 0.5) < 0.25)
 	else:
 		it.fire = dist < reach and fmod(_clock, 0.2) < 0.1
+	if _autocombos and w.is_sword() and dist < reach * 1.2:
+		_combo_keys(it, m.sim.facing, fmod(_clock, 1.2))
 	if _autoguard:
 		var c := fmod(_clock, 8.0)
 		var want_guard := c >= 5.0 and c < 7.0

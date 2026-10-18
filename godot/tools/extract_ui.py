@@ -340,9 +340,10 @@ def main() -> None:
             layer["texture"] = image_key(rel)
     print(f"{len(particles)} particle scripts, {textures} new particle textures")
 
-    # Weapon and weapon-mode tables, and the body colour schemes, as data for the game.
+    # Weapon and weapon-mode tables, the body colour schemes and the sword command combos, as
+    # data for the game. The combo keys are C++ enum names, so they stay strings.
     tables: dict = {}
-    for name in ("weapon_parameter", "weapon_mode_parameter", "character_mapping_parameter"):
+    for name in ("weapon_parameter", "weapon_mode_parameter", "character_mapping_parameter", "combo_parameter"):
         src = data_dir / "script" / "parameter" / f"{name}.lua"
         chunk = Parser(tokenize(src.read_bytes().decode("cp949", errors="replace"))).chunk()
         tables.update({k: resolve(v, chunk) for k, v in chunk.items() if isinstance(v, (dict, list))})

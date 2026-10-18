@@ -169,6 +169,16 @@ static func spawn_effect(root: Node3D, path: String, basis: Basis, at: Vector2, 
 static func effect_basis(scale := Original.SCALE) -> Basis:
 	return MechView.G * Basis.from_scale(Vector3(1, 1, -1) * scale)
 
+## An effect turned to a mech's facing: projectile_manager.add(name, pos, dir, up (0, -1, 0)),
+## a look-at frame along the facing, with HAHA_SCALE_VAL like the other effects (inferred).
+static func facing_effect_basis(facing_deg: int) -> Basis:
+	var d := Original.vec2_from_deg(facing_deg)
+	var z := Vector3(d.x, 0, d.y)
+	var up := Vector3(0, -1, 0)
+	var x := up.cross(z).normalized()
+	var y := z.cross(x)
+	return MechView.G * Basis(x, y, z) * Basis.from_scale(Vector3(1, 1, -1) * Original.SCALE)
+
 ## A bullet's bullet_dead_xfile where it hit or ran out.
 static func hit_flash(root: Node3D, at: Vector2, path := HIT_FLASH) -> void:
 	spawn_effect(root, path, effect_basis(), at)

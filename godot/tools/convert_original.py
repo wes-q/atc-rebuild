@@ -520,6 +520,11 @@ def convert_bodies(data_dir: pathlib.Path, out_dir: pathlib.Path) -> None:
     for files in GUARD_FILES.values():
         wanted.update(files)
     wanted.update(GUARD_EFFECTS)
+    # The sword command combos' flashes (combo_parameter.lua).
+    for combo in params.get("combo_parameter", []):
+        for field in ("effect_name", "rotate_effect_name"):
+            if isinstance(combo.get(field), str) and combo[field]:
+                wanted.add(combo[field])
     converted = 0
     for rel in sorted(wanted):
         norm = rel.replace("\\", "/").lstrip("./")

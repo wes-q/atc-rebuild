@@ -27,7 +27,8 @@ class Intent:
 signal fired(origin: Vector2, deg: int)
 ## A burst of bullets starts (pt_send_shoot): the moment a guided weapon takes its target.
 signal attack_started(slot: int)
-## A sword swing starts: swing is the attack clip index, 2, 3 or 4 (ComboSystem).
+## A sword swing starts: swing is the attack clip index, 2, 3 or 4 (ComboSystem). The
+## command combo it carries, if any, is in swing_combo.
 signal swung(slot: int, swing: int)
 ## rcPlayer::change_weapon
 signal weapon_changed(slot: int)
@@ -158,6 +159,32 @@ var attacking := false
 var combo_active := false
 var combo_index := 0
 var _combo_queued := false
+## The command combo the queued swing carries (1 for a plain click, which has no entry).
+var _queued_combo := 0
+## A finishing combo ended the chain: no more swings queue (ComboSystem::end_combo).
+var _combo_finished := false
+## combo_id of the swing that just started, 0 for none.
+var swing_combo := 0
+
+# Command combos (ComboInputManager): the sword's key sequences, read every frame. Arrow
+# keys count relative to the facing: "right" is a tap toward it, "left" a tap away. Each key
+# must follow the last within 0.2 s (register_combo_command), or the sequence restarts.
+enum ComboKey { LEFT, RIGHT, UP, DOWN, LCLICK, RCLICK, BOTH_CLICK }
+const COMBO_KEY_LIMIT := 0.2
+class ComboCommand:
+	var id := 0
+	var keys: Array[int] = []
+	var cur_key := 0
+	var times: Array[float] = []
+
+	func cancel() -> void:
+		cur_key = 0
+		for i in times.size():
+			times[i] = 0.0
+var combo_commands: Array[ComboCommand] = []
+## complete_combo_id: a finished sequence waits here until a click takes it.
+var combo_ready := 0
+var _combo_prev := [false, false, false, false, false, false]
 var _swing_time := 0.0
 var _prev_fire := false
 var _prev_weapon_key := 0
@@ -188,6 +215,7 @@ func _init(body_name := "zeid", weapon_slot := Original.START_WEAPON) -> void:
 	stats = GameData.robot(body)
 	for id in Bodies.loadout(body):
 		slots.append(Slot.new(GameData.weapon(id), body))
+	_register_combo_commands()
 	weapon_index = weapon_slot
 	move_speed = stats.move_speed
 	booster_speed = stats.booster_speed
@@ -242,6 +270,9 @@ func step(intent: Intent, dt: float) -> void:
 	_update_dash(intent)
 	_update_map()
 	_update_guard(intent, dt)
+	# rcPlayerManager::update reads the combo keys before update_my_input handles the click,
+	# so the click that completes a combo also swings with it.
+	_update_combo_input(intent, dt)
 	_update_weapons(intent, dt)
 	booster_warning_time = maxf(0.0, booster_warning_time - dt)
 
@@ -519,6 +550,81 @@ func _clear_confusion() -> void:
 	damage_mul = 1.0
 	fire_delay = 0.0
 
+## rcPlayer init and register_combo_command: the commands of the body's sword
+## (combo_id_to_apply), in table order. They are read whatever weapon is selected.
+func _register_combo_commands() -> void:
+	combo_commands.clear()
+	for sl in slots:
+		if int(sl.data.param_num("number_of_combo_id")) <= 0:
+			continue
+		combo_commands.clear()
+		for id in sl.data.param.get("combo_id_to_apply", []):
+			var cp := Bodies.combo_param(int(id))
+			if cp.is_empty():
+				continue
+			var c := ComboCommand.new()
+			c.id = int(id)
+			for k in cp.get("key", []):
+				c.keys.append(ComboKey.get(str(k).trim_prefix("COMBO_KEY_"), 0))
+				c.times.append(0.0)
+			combo_commands.append(c)
+
+## ComboInputManager::update: key presses this frame, turned to the facing
+## (update_key_info), fed to every command in order. When two finish on the same click
+## the later one in the table wins, as the loop did not stop.
+func _update_combo_input(intent: Intent, dt: float) -> void:
+	var now := [intent.left, intent.right, intent.up, intent.down, intent.fire, intent.boost]
+	var down: Array[bool] = []
+	for i in 6:
+		down.append(now[i] and not _combo_prev[i])
+	_combo_prev = now
+	if combo_commands.is_empty() or combo_ready != 0:
+		return
+	var info := combo_key_info(down, facing)
+	for c in combo_commands:
+		if info[c.keys[c.cur_key]]:
+			c.cur_key += 1
+			if c.cur_key >= c.keys.size():
+				combo_ready = c.id
+				c.cur_key = c.keys.size() - 1
+		else:
+			c.times[c.cur_key] += dt
+			if c.times[c.cur_key] > COMBO_KEY_LIMIT:
+				c.cancel()
+
+## update_key_info: key-down edges [left, right, up, down, left click, right click] as
+## COMBO_KEY flags, with the arrows turned so RIGHT is toward the facing and LEFT away.
+static func combo_key_info(down: Array, deg: int) -> Array[bool]:
+	var info: Array[bool] = [down[0], down[1], down[2], down[3], down[4], down[5], down[4] and down[5]]
+	deg = (deg % 360 + 360) % 360
+	if deg >= 45 and deg < 135:
+		info[ComboKey.RIGHT] = info[ComboKey.UP]
+		info[ComboKey.LEFT] = info[ComboKey.DOWN]
+	elif deg >= 135 and deg < 225:
+		var t := info[ComboKey.LEFT]
+		info[ComboKey.LEFT] = info[ComboKey.RIGHT]
+		info[ComboKey.RIGHT] = t
+	elif deg >= 225 and deg < 315:
+		info[ComboKey.LEFT] = info[ComboKey.UP]
+		info[ComboKey.RIGHT] = info[ComboKey.DOWN]
+	info[ComboKey.UP] = false
+	info[ComboKey.DOWN] = false
+	return info
+
+## get_combo_id, checked against the weapon's own combos, then start_getting_combo_input:
+## the completed combo, or 0, and every sequence starts over.
+func take_combo(w: GameData.Weapon) -> int:
+	var id := combo_ready
+	combo_ready = 0
+	for c in combo_commands:
+		c.cancel()
+	if id == 0:
+		return 0
+	for allowed in w.param.get("combo_id_to_apply", []):
+		if int(allowed) == id:
+			return id
+	return 0
+
 ## rcPlayerManager::update_my_input, number keys: change weapon on the key press, unless the
 ## fire button is held, an attack is still going out, or a combo or charge is under way.
 func _update_weapon_switch(intent: Intent) -> void:
@@ -588,6 +694,9 @@ func _update_weapons(intent: Intent, dt: float) -> void:
 			if _combo_queued:
 				_combo_queued = false
 				combo_index += 1
+				swing_combo = _queued_combo if _queued_combo > 1 else 0
+				# A finisher from the queue ends the chain (the first swing's does not).
+				_combo_finished = int(Bodies.combo_param(swing_combo).get("finish", 0)) == 1
 				_swing(slot)
 			else:
 				combo_active = false
@@ -607,13 +716,20 @@ func _update_weapons(intent: Intent, dt: float) -> void:
 			shield_clicked.emit()
 		return
 	if slot.data.is_sword():
-		# combo_shoot: a click during a swing queues the next one, up to the last swing clip.
+		# combo_shoot: a click during a swing queues the next one, up to the last swing clip,
+		# carrying a completed command combo or 1 for a plain click. Otherwise a ready sword
+		# starts with the combo completed, if any (shoot(combo_id + 100)).
 		if combo_active:
-			if not _combo_queued and combo_index != slot.last_swing():
+			if not _combo_queued and not _combo_finished and combo_index != slot.last_swing():
 				_combo_queued = true
+				var id := take_combo(slot.data)
+				_queued_combo = id if id != 0 else 1
+				slot.recharge = 0.0
 		elif slot.is_ready():
 			combo_active = true
+			_combo_finished = false
 			combo_index = Original.SWORD_FIRST_SWING
+			swing_combo = take_combo(slot.data)
 			_swing(slot)
 		return
 	if attacking or not slot.is_ready() or slot.ammo == 0:
@@ -774,6 +890,11 @@ func reset_at(spawn: Vector2, face: int) -> void:
 	attacking = false
 	combo_active = false
 	_combo_queued = false
+	_combo_finished = false
+	swing_combo = 0
+	combo_ready = 0
+	for c in combo_commands:
+		c.cancel()
 	streaming = false
 	charging = false
 	charge_level = -1

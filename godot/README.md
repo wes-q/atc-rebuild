@@ -11,6 +11,7 @@ brew install ffmpeg              # optional: cleans the original sound files' ta
 python3 -I godot/tools/extract_db.py RaycrashArchive/extracted/database/raycrash1 godot/assets/original/data
 python3 -I godot/tools/extract_ui.py "RaycrashArchive/extracted/source/ATC BIN/bin/data" godot/assets/original
 python3 -I godot/tools/convert_original.py "RaycrashArchive/extracted/source/ATC BIN/bin/data" godot/assets/original
+godot --headless --path godot --import   # import what the converter wrote
 godot --path godot               # play
 godot --path godot -e            # open in the editor
 godot --headless --path godot -s tests/test_mech_sim.gd   # logic tests
@@ -18,7 +19,9 @@ godot --headless --path godot -s tests/test_mech_sim.gd   # logic tests
 
 The converted art and data in `assets/original/` are CodiNET's and are git-ignored. Rebuild them
 with the three tools, in that order (the converter reads the other two's output), whenever
-they are missing. The database extractor exports only game-data
+they are missing, then run the import line. Playing does not import new models; the game
+skips any it cannot load without an error, so a missed import shows up only as a missing
+clip or effect. The database extractor exports only game-data
 tables (robots, weapons, parts, shop catalogue) and never player, clan, log or billing tables.
 
 Record a scripted demo: `godot --path godot --write-movie out.avi --fixed-fps 30 --quit-after 300 -- autopilot`
@@ -146,7 +149,8 @@ second, `hp=60` starts every mech with 60 HP for quick knockouts, `capture=<dir>
 frames a second (run the window with `--max-fps 60 --always-on-top`, or it runs unthrottled or
 stalls when covered). `--write-movie` records sound as well. For practice: `dummy_guard` has the
 target raise its guard whenever it can, `dummy_near=200` starts it that far in front of you.
-For the autopilot: `slot=4` keeps it on one weapon, `autoguard` guards 2 s in every 8.
+For the autopilot: `slot=4` keeps it on one weapon, `autoguard` guards 2 s in every 8, `combos`
+enters both command combos with a sword.
 
 ## Controls (as in the original)
 
@@ -156,7 +160,7 @@ For the autopilot: `slot=4` keeps it on one weapon, `autoguard` guards 2 s in ev
 | Mouse | Aim. The mech turns toward the cursor at its turn rate |
 | 1 / 2 / 3 / 4 | The body's weapon slots (not while firing, a burst is out, a combo plays or a bow draws). Drops the guard |
 | Space | Raise or lower the guard (toggle) |
-| Left click | Attack with the selected weapon. One click, one attack, except: hold the Heavy Machinegun or Plasma Shock Wave to keep firing; hold the Plasma Bow to charge and let go to shoot; let go of the Cluster Cannon to burst its shells in the air |
+| Left click | Attack with the selected weapon. One click, one attack, except: hold the Heavy Machinegun or Plasma Shock Wave to keep firing; hold the Plasma Bow to charge and let go to shoot; let go of the Cluster Cannon to burst its shells in the air. With a sword, tap toward your facing then click, or away, toward, click, for a command combo |
 | F | Next lock-on target, with the missile launcher |
 | Right click (hold) | Boost, draining the gauge |
 | + / - | Camera depth. Otherwise it follows the nearest enemy automatically |
@@ -248,6 +252,25 @@ ES Type 1 shield held apart.
 - **Plasma Shock Wave:** hold to stream 10 rounds a second, each turned up to 30° either
   way at random, homing weakly (40) on the lock-on target within 600 units.
 - **Saber Type 1:** Alicia's three-swing combo, landing from the start of each swing.
+
+**Command combos** (Step 9, from `rcCombo.cpp`, `rcManager.cpp` `combo_shoot` and
+`register_combo_command`, `combo_parameter.lua`):
+- Every body's sword has two: a tap toward your facing then a click, and a tap away, a
+  tap toward, then a click. The arrow keys count relative to the mech's facing (facing up,
+  W is "toward" and S "away"). Each key must come within 0.2 s of the last
+  (`register_combo_command` sets 0.2; the table's own `limit_time` 0.8 is never read), or the
+  sequence starts over.
+- The click that completes a combo swings with it. On a first swing it adds its damage
+  there; during a chain it rides on the queued swing. A plain queued click carries nothing.
+- Damage added: dagger +14 and +30 (56 and 72 in all), saber +15 and +32 (56 and 73). The
+  three-key combo is a finisher: when it comes from the queue, the chain ends after it
+  (a finisher on the first swing does not end it, as the original commented that out).
+- When both sequences finish on the same click the three-key one wins: the original kept
+  checking after the first match.
+- A combo swing throws `combo_start.x` (a ring and "Combo!") at the mech and
+  `combo_attack.x` turned to its facing (Alicia: `ali_combo_attack.x`). Other machines get
+  the combo with the swing and show the same.
+- The combo keys are read whatever weapon is selected, but only a sword's click uses them.
 
 **Shields** (Step 8, from `rcManager.cpp` `updateguard`, `rcPlayer.cpp` `guard`, `world.cpp`
 `process_crash` and `receive_guard`):
@@ -360,8 +383,9 @@ parts added to the base stats.
   (inferred).
 - The original's Plasma Shock Wave range indicator and the Plasma Cannon's beam
   shrinking timing after a hit are approximations.
-- Command combos (right then click: +14 damage; left, right, click: +30) are not ported;
-  plain repeated clicks, which add nothing, are.
+- The combo flashes have no clip to time them, so they last 1 s, and the turned one is
+  placed as a look-at along the facing with up (0, -1, 0) (inferred from the projectile
+  manager's arguments). `dash_distance` is 0 in every combo, so combo dashes are not ported.
 - The particle engine's random rotation seeds, wave trails and `billboard = 3` jitter are not
   ported. Interpolation between keys is assumed linear (`fcurve.cpp` is not in the archive).
 - Effect models are placed with HAHA_SCALE_VAL and no turn (inferred: the projectile
@@ -412,5 +436,5 @@ tools/inspect_import.gd     prints an imported model's tree and clips
 tools/render_poses.gd       renders the mech at several facings
 tools/render_map.gd         renders an arena from above with its walls, bounds and start points
 tools/extract_ui.py         reads the HUD window tables and particle scripts, copies their art
-tests/test_mech_sim.gd      166 checks against the original database values and rules
+tests/test_mech_sim.gd      182 checks against the original database values and rules
 ```

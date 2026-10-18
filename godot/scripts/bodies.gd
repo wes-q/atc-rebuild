@@ -129,6 +129,15 @@ static func skins(body: String) -> Array[String]:
 		out.append(ROOT + x_name(str(s)) + ".png")
 	return out
 
+## combo_parameter.lua: a sword command combo by combo_id, or {} for none (id 1, a plain
+## queued swing, has no entry).
+static func combo_param(id: int) -> Dictionary:
+	_load()
+	for c in _params.get("combo_parameter", []):
+		if int(c.get("combo_id", 0)) == id:
+			return c
+	return {}
+
 ## weapon_mode_parameter.lua sound_file: weapon change, hit, each bullet or swing.
 static func sounds(id: int) -> Array:
 	var s: Array = mode_param(id).get("sound_file", [])

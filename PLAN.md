@@ -38,6 +38,7 @@ What the archive contains: `docs/archive-inventory.md`.
 | 6 | The Zeid's other weapons: sword combos, missiles (SR-3 mode 2 is unreachable in the original) | Done |
 | 7 | The other four bodies | Done |
 | 8 | Shields and the slot-4 specials (EMP, Confusing Beam, X-Mine) | Done |
+| 9 | Sword command combos | Done |
 
 ## History
 
