@@ -31,6 +31,11 @@ func _init() -> void:
 	test_sound_distance_and_pan()
 	test_clock_digits()
 	test_boost_sound_trigger()
+	test_fire_needs_a_click()
+	test_bullets_cost_energy()
+	test_weapon_switching()
+	test_sword_combo()
+	test_missile_ammo_and_burst()
 	print("\n%d passed, %d failed" % [passed, failures])
 	quit(1 if failures > 0 else 0)
 
@@ -187,8 +192,9 @@ func test_rifle_burst_and_recharge() -> void:
 	var clock := [0.0]
 	sim.fired.connect(func(_o: Vector2, _d: int) -> void: shots.append(clock[0]))
 	var it := MechSim.Intent.new()
-	it.fire = true
+	# Clicking every other frame: each press may start a burst.
 	for i in 240:
+		it.fire = i % 2 == 0
 		sim.step(it, DT)
 		clock[0] += DT
 	check(shots.size() >= 6, "fires repeated bursts (%d shots in 4 s)" % shots.size())
@@ -374,3 +380,116 @@ func test_boost_sound_trigger() -> void:
 	turned[4] = 1.0
 	remote.apply_snapshot(turned)
 	check(heard[0] == 1, "another player hears it for each new boosting move, not every packet (%d)" % heard[0])
+
+# --- Weapons (step 6) -----------------------------------------------------------------------
+
+func test_fire_needs_a_click() -> void:
+	print("fire button (update_my_input)")
+	var sim := MechSim.new()
+	var shots := [0]
+	sim.fired.connect(func(_o: Vector2, _d: int) -> void: shots[0] += 1)
+	var it := MechSim.Intent.new()
+	it.fire = true
+	run(sim, it, 4.0)
+	check(shots[0] == 3, "holding the button fires one burst only (%d shots)" % shots[0])
+
+func test_bullets_cost_energy() -> void:
+	print("energy per bullet (cost_energy)")
+	var sim := MechSim.new()
+	var it := MechSim.Intent.new()
+	it.fire = true
+	sim.step(it, DT)
+	it.fire = false
+	sim.booster_gage = 1000.0
+	run(sim, it, 0.35)
+	check(near(sim.booster_gage, 1000.0 - 60.0 + 110.0 * 0.35, 1.5), "an SR-3 burst spends 3 x 20 of the gauge (left %.1f)" % sim.booster_gage)
+
+func test_weapon_switching() -> void:
+	print("weapon keys")
+	var sim := MechSim.new()
+	check(sim.weapon_index == 1 and sim.weapon.name == "SR-3", "starts on slot 2, the SR-3")
+	check(sim.slots[0].data.name == "Dagger Type 1" and sim.slots[2].data.name == "MML Type 1", "slots 1 and 3 hold the dagger and the MML")
+	var changed := [-1]
+	sim.weapon_changed.connect(func(slot: int) -> void: changed[0] = slot)
+	var it := MechSim.Intent.new()
+	it.weapon_key = 1
+	sim.step(it, DT)
+	check(sim.weapon_index == 0 and changed[0] == 0, "key 1 takes the dagger")
+	it.weapon_key = 0
+	sim.step(it, DT)
+	it.weapon_key = 4
+	sim.step(it, DT)
+	check(sim.weapon_index == 0, "key 4, the shield, is not usable yet")
+	it.weapon_key = 0
+	sim.step(it, DT)
+	it.weapon_key = 3
+	it.fire = true
+	sim.step(it, DT)
+	check(sim.weapon_index == 0, "no change while the fire button is held")
+	it.fire = false
+	it.weapon_key = 0
+	run(sim, it, 1.0)
+	it.weapon_key = 3
+	sim.step(it, DT)
+	check(sim.weapon_index == 2, "key 3 takes the MML")
+
+func test_sword_combo() -> void:
+	print("dagger combo (ComboSystem)")
+	var sim := MechSim.new()
+	var swings: Array[int] = []
+	sim.swung.connect(func(_slot: int, swing: int) -> void: swings.append(swing))
+	var it := MechSim.Intent.new()
+	it.weapon_key = 1
+	sim.step(it, DT)
+	it.weapon_key = 0
+	# Click five times quickly: the first swing starts, one more is queued at a time.
+	for i in 120:
+		it.fire = i % 6 == 0 and i < 60
+		sim.step(it, DT)
+	check(swings == [2, 3, 4], "clicks chain three swings, clips 2, 3, 4 (%s)" % [swings])
+	check(not sim.combo_active and not sim.attacking, "the combo ends after the third swing")
+	check(sim.recharge < 0.7, "the 0.7 s cooldown runs after the combo (%.2f)" % sim.recharge)
+	var single := MechSim.new()
+	var one: Array[int] = []
+	single.swung.connect(func(_slot: int, swing: int) -> void: one.append(swing))
+	it = MechSim.Intent.new()
+	it.weapon_key = 1
+	single.step(it, DT)
+	it.weapon_key = 0
+	single.booster_gage = 1000.0
+	it.fire = true
+	single.step(it, DT)
+	check(near(single.booster_gage, 1000.0 - 18.0 + 110.0 * DT, 0.1), "a swing spends 18 of the gauge (left %.1f)" % single.booster_gage)
+	it.fire = false
+	run(single, it, 1.0)
+	check(one == [2], "one click, one swing")
+
+func test_missile_ammo_and_burst() -> void:
+	print("MML Type 1")
+	var sim := MechSim.new()
+	var w := sim.slots[2].data
+	check(w.ammo == 120 and w.fire_num == 3 and near(w.fire_interval, 0.3), "120 missiles, bursts of 3 0.3 s apart")
+	check(near(w.bullet_speed, 528.0) and near(w.life, 1.7) and near(w.reload, 3.5), "528 units/s, 1.7 s life, 3.5 s reload")
+	check(w.guided_flag == 100 and w.collision_checker == 2, "guided (100), the one hit decides the damage")
+	var it := MechSim.Intent.new()
+	it.weapon_key = 3
+	sim.step(it, DT)
+	it.weapon_key = 0
+	var times: Array[float] = []
+	var clock := [0.0]
+	sim.fired.connect(func(_o: Vector2, _d: int) -> void: times.append(clock[0]))
+	it.fire = true
+	for i in 90:
+		sim.step(it, DT)
+		clock[0] += DT
+		it.fire = false
+	check(times.size() == 3 and near(times[0], 0.3, 0.02) and near(times[2], 0.9, 0.03), "missiles leave at 0.3, 0.6 and 0.9 s (%s)" % [times])
+	check(sim.slots[2].ammo == 117, "one ammo per missile (%d left)" % sim.slots[2].ammo)
+	sim.slots[2].ammo = 2
+	sim.slots[2].recharge = w.reload
+	times.clear()
+	it.fire = true
+	for i in 90:
+		sim.step(it, DT)
+		it.fire = false
+	check(times.size() == 2 and sim.slots[2].ammo == 0, "with 2 left, the burst is cut to 2")

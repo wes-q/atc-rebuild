@@ -143,11 +143,56 @@ window with `--max-fps 60`, or it runs unthrottled). `--write-movie` records sou
 |---|---|
 | WASD or arrows | Move along the screen axes |
 | Mouse | Aim. The mech turns toward the cursor at its turn rate |
-| Left click | Fire the SR-3: 3-round burst, then the reload |
+| 1 / 2 / 3 | Dagger, SR-3, missile launcher (not while firing, a burst is out or a combo plays) |
+| Left click | Attack with the selected weapon. One click, one attack: holding does not repeat |
+| F | Next lock-on target, with the missile launcher |
 | Right click (hold) | Boost, draining the gauge |
 | + / - | Camera depth. Otherwise it follows the nearest enemy automatically |
 | M | Sound and music on or off (this recreation's own) |
 | Esc | Leave the match |
+
+## Weapons (from `weapon_parameter.lua`, `weapon_mode_parameter.lua`, `rcAmmo.cpp`, `rcCombo.cpp`)
+
+The Zeid's default loadout from `RobotInfo`: slot 1 Dagger Type 1 (id 28), slot 2 SR-3 (id 3,
+selected at the start), slot 3 MML Type 1 (id 4), slot 4 ES Type 1, a shield.
+
+- **Switching:** keys 1 to 3. The new weapon is drawn with its first clip. Every bullet that
+  mech has in flight disappears (`clear_active_bullet`), and the owner hears the weapon's
+  change sound. Every weapon keeps recharging while not selected, and all of them pause
+  while the mech is attacking.
+- **Energy:** each bullet or swing spends the weapon's `cost_energy` from the boost gauge:
+  20 per SR-3 bullet, 18 per dagger swing, nothing for missiles.
+- **Dagger:** a click swings at once; clicks during a swing queue the next, up to three
+  (clips 2, 3, 4 of `anim03/Dagger.x`), each starting when the last ends. A swing can land
+  from 0.3 s until 0.4 s after it starts, on the first mech within 59.4 units and inside a
+  45-degree arc ahead, for 42 damage. The attacker's machine decides (`collision_checker`
+  1). The 0.7 s cooldown runs after the whole combo. The blade leaves the original trail
+  texture, and a hit throws `sword_hit.x`.
+- **SR-3:** as before, but one burst per click and 20 energy per bullet.
+- **MML Type 1:** 120 missiles, bursts of 3 leaving 0.3 s apart, 528 units/s for 1.7 s, 26
+  damage, 3.5 s reload, 1 ammo per missile. With the launcher selected you lock onto the
+  nearest enemy within 540 units and 45 degrees either side of your facing (F steps to the
+  next). A burst chases the target locked when it was fired, re-aiming every 0.05 s by
+  `max(0.05, dot x 100 / 255)`, and never loses it; with no lock it flies straight. A missile
+  that runs out explodes harmlessly. The one hit decides the damage, and their camera shakes
+  (0.25 s, power 10; the SR-3 shakes 0.1 s, power 4).
+- **Lock-on HUD:** LOCK ON on your target, or on the screen ring when it is off-screen; a
+  marker on other candidates; LOCKED in the centre while someone has locked onto you.
+
+**SR-3 mode 2 is left out on purpose.** Its data exists (`zeid2_mode2`, a 7-shot spray), but
+the shipped client cannot reach it: the F-key handler that would select it is commented out
+in `rcManager.cpp`.
+
+## Particle effects (from `psys.cpp`, `billboard.cpp`, `engine.cpp`)
+
+A frame named `p<group>:<script>` in a model runs particle scripts from
+`data/script/particle`. `scripts/particle_fx.gd` ports the engine: sprays and trails, emit
+counts, gaps, spreads, life, colour, scale and spin keys sampled into 64 steps, sprite
+sheets, the three billboard modes, linked and world-space sprays, additive or alpha
+blending. That drives the boost nozzles (the idle ones always, the main ones while
+boosting, the directional ones in bursts against each new move), bullet glows and impacts,
+the missile exhaust and trail, wall crashes, HIT! and DAMAGE!, the knockout burst and the
+low-health sparks.
 
 ## How the original plays (read from its source)
 
@@ -162,7 +207,7 @@ window with `--max-fps 60`, or it runs unthrottled). `--write-movie` records sou
   An empty gauge drops back to walking. At or below the low line (330 for the Zeid) a boost cannot start and the
   gauge recovers at half rate.
 
-## Numbers in use (Zeid with SR-3)
+## Numbers in use (Zeid)
 
 From the original database (`RobotInfo` id 1, `WeaponInfo` id 3), converted the way the
 server packed them and the client unpacked them. `scripts/game_data.gd` does the conversion.
@@ -176,7 +221,9 @@ server packed them and the client unpacked them. `scripts/game_data.gd` does the
 | Gauge | 1900, drain 140, recovery 110, low line 330 | same, per second |
 | Turn rate | 320 | 320 deg/s |
 | Armour points | 700 | 700 |
-| SR-3 | 3 shots, 100 ms apart, speed 1600, life 700, reload 1200, damage 12 | 3 shots 0.1 s apart, 528 units/s, 0.7 s, 1.2 s reload after the 0.5 s fire animation, 12 damage |
+| SR-3 | 3 shots, 100 ms apart, speed 1600, life 700, reload 1200, damage 12, energy 20 | 3 shots 0.1 s apart, 528 units/s, 0.7 s, 1.2 s reload after the 0.5 s fire animation, 12 damage, 20 gauge per shot |
+| Dagger Type 1 | area 180, arc 45, life 450, reload 700, damage 42, energy 18 | 59.4 units, 45 degrees, lands 0.3 to 0.4 s, 0.7 s after a combo, 42 damage, 18 per swing |
+| MML Type 1 | 3 shots, 300 ms apart, speed 1600, life 1750, reload 3500, damage 26, ammo 120, guided 100 | 3 missiles 0.3 s apart, 528 units/s, 1.7 s, 3.5 s reload, 26 damage, 120 ammo, homing |
 
 Armour and MCS rows are not applied: the original server never sent them, only purchased
 parts added to the base stats.
@@ -187,16 +234,20 @@ parts added to the base stats.
   identifies it as `continuous_time`, the gap between shots.
 - The fire animation length (0.5 s) comes from the converted clip; the original playback rate
   of `.x` animations is assumed to match.
-- Booster flames and the knockout burst are placeholder particles. Only the single-quad case
-  of the original particle engine (`psys.cpp`) is ported, for HIT! and DAMAGE!.
-- SR-3 mode 2 (7-shot spray) is defined but not wired. How the original switches modes is not
-  traced yet.
-- The rifle's own animation is not in yet.
+- The shield (slot 4, ES Type 1, held with Space in the original) and the EMP Shock Gun are
+  not in yet.
+- Command combos (right then click: +14 damage; left, right, click: +30) are not ported;
+  plain repeated clicks, which add nothing, are.
+- The particle engine's random rotation seeds, wave trails and `billboard = 3` jitter are not
+  ported. Interpolation between keys is assumed linear (`fcurve.cpp` is not in the archive).
+- Effect models are placed with HAHA_SCALE_VAL and no turn (inferred: the projectile
+  manager's placement for impacts is not traced).
+- The lock-on sound (`sound/lock`) is not in the archive.
+- The held weapons' own small animations are not played.
 - Within one draw order the original drew sibling windows in Lua's hash order, which is
   not recoverable. Text windows are drawn last so names stay readable (inferred).
 - The results screen is this recreation's own panel, not the original's result page.
 - The original drew HUD text with its own bitmap font; Godot's default font stands in.
-- The weapon change sound (`gun_start`) is copied but unused, since weapons do not switch yet.
 - City's sky uses `mount01.png`, which is not in the archive, so that part draws untextured.
 - Starting facing is toward the arena centre. The original's start direction is not in the
   source we have (inferred).
@@ -206,9 +257,7 @@ parts added to the base stats.
   original used whichever its collision library reported first.
 - Light strengths are matched by eye; Direct3D's fixed-function lighting has no exact
   Godot equivalent.
-- The bullet impact flash's scale and growth are inferred.
 - Team mode, more than two players, NPCs, money and grades are not in yet.
-- The character explosion's particles are a stand-in; the original defines them in script.
 - No lag compensation. Fine on a home network, untested over the internet.
 
 ## Layout
@@ -229,12 +278,12 @@ scripts/start_menu.gd    practice, host and join menu
 scripts/hud.gd           the original battle HUD: dialogs, radar, markers, name tags
 scripts/original_ui.gd   the engine's UI windows, built from the exported Lua tables
 scripts/game_sound.gd    positioned sound effects and the BGM play list
-scripts/particle_quad.gd one layer of an original particle script (single-quad case)
+scripts/particle_fx.gd   the original particle engine: sprays, trails, billboards, sprite sheets
 tools/convert_original.py   .x to glTF converter (reads the archive, writes assets/original)
 tools/extract_db.py         reads game tables straight out of the SQL Server 2000 backup
 tools/inspect_import.gd     prints an imported model's tree and clips
 tools/render_poses.gd       renders the mech at several facings
 tools/render_map.gd         renders an arena from above with its walls, bounds and start points
 tools/extract_ui.py         reads the HUD window tables and particle scripts, copies their art
-tests/test_mech_sim.gd      76 checks against the original database values and rules
+tests/test_mech_sim.gd      95 checks against the original database values and rules
 ```

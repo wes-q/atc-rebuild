@@ -29,9 +29,13 @@ EXTRA_IMAGES = [
     "ui/widget/game_fight/rader/hood_player_enemy_far.PNG",
     "ui/widget/game_fight/rader/hood_player_friend.png",
     "ui2/game_fight/SPAttack.png",
+    # Lock-on markers (Radar::render_lock_on_system) and the dagger's trail (Weapon28_mode1).
+    "ui/widget/game_fight/rader/fughtui_lockon.PNG",
+    "ui/widget/game_fight/rader/fughtui_lockon_hud.png",
+    "ui/widget/game_fight/rader/fughtui_locked.PNG",
+    "ui/widget/game_fight/rader/fughtui_locking.PNG",
+    "texture/zeid_sword_jan02.BMP",
 ]
-# Particle scripts (script/particle/<name>.lua) for the HIT and DAMAGE markers.
-PARTICLES = ["font_hit", "font_damage"]
 
 TOKEN = re.compile(
     r"""
@@ -272,6 +276,14 @@ def rename_images(value):
     return value
 
 
+def copy_image(src: pathlib.Path, dst: pathlib.Path) -> None:
+    """PNG as is; BMP, TGA and DDS through macOS's image tool."""
+    if src.suffix.lower() == ".png":
+        shutil.copyfile(src, dst)
+    else:
+        subprocess.run(["sips", "-s", "format", "png", str(src), "--out", str(dst)], check=True, capture_output=True)
+
+
 def main() -> None:
     data_dir = pathlib.Path(sys.argv[1]).resolve()
     out_dir = pathlib.Path(sys.argv[2]).resolve() / "ui"
@@ -295,28 +307,38 @@ def main() -> None:
             continue
         dst = out_dir / image_key(rel)
         dst.parent.mkdir(parents=True, exist_ok=True)
-        if src.suffix.lower() == ".png":
-            shutil.copyfile(src, dst)
-        else:
-            subprocess.run(["sips", "-s", "format", "png", str(src), "--out", str(dst)], check=True, capture_output=True)
+        copy_image(src, dst)
         copied += 1
-    particles = {}
-    for name in PARTICLES:
-        src = data_dir / "script" / "particle" / f"{name}.lua"
-        table = Parser(tokenize(src.read_bytes().decode("cp949", errors="replace"))).chunk().get("base_particle", {})
-        layers = table.get(name, {})
-        for layer in layers.values():
-            if isinstance(layer, dict) and isinstance(layer.get("texture"), str):
-                rel = layer["texture"].lstrip("./")
-                found = find_case_insensitive(data_dir, rel)
-                if found is None:
-                    print(f"  missing particle texture {rel}")
-                    continue
-                dst = out_dir / image_key(rel)
+    # Every particle script: script/particle.lua first, then the per-effect files, which the
+    # game loaded later and which replace same-named entries.
+    scripts = [data_dir / "script" / "particle.lua"] + sorted((data_dir / "script" / "particle").glob("*.lua"))
+    particles: dict = {}
+    for src in scripts:
+        if not src.exists():
+            continue
+        chunk = Parser(tokenize(src.read_bytes().decode("cp949", errors="replace"))).chunk()
+        table = resolve(chunk.get("base_particle", {}), chunk)
+        if isinstance(table, dict):
+            for name, layers in table.items():
+                if isinstance(layers, dict) and name != "@order":
+                    particles[name] = layers
+    textures = 0
+    for layers in particles.values():
+        for key, layer in layers.items():
+            if not isinstance(layer, dict) or not isinstance(layer.get("texture"), str):
+                continue
+            rel = layer["texture"].replace("\\", "/").lstrip("./")
+            found = find_case_insensitive(data_dir, rel)
+            if found is None:
+                layer["texture"] = ""
+                continue
+            dst = out_dir / image_key(rel)
+            if not dst.exists():
                 dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(found, dst)
-                layer["texture"] = image_key(rel)
-        particles[name] = layers
+                copy_image(found, dst)
+                textures += 1
+            layer["texture"] = image_key(rel)
+    print(f"{len(particles)} particle scripts, {textures} new particle textures")
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "particles.json").write_text(json.dumps(particles, indent=1), encoding="utf-8")
     (out_dir / "windows.json").write_text(json.dumps(rename_images(windows), ensure_ascii=False, indent=1), encoding="utf-8")

@@ -35,8 +35,8 @@ What the archive contains: `docs/archive-inventory.md`.
 | 3 | Damage, knockouts and rounds | Done |
 | 4 | A real battle map: scenery and collision grid | Done |
 | 5 | Sound and the original HUD art | Done |
-| 6 | The Zeid's other weapons: sword combos, missiles, SR-3 mode 2 | Next |
-| 7 | The other four bodies | |
+| 6 | The Zeid's other weapons: sword combos, missiles (SR-3 mode 2 is unreachable in the original) | Done |
+| 7 | The other four bodies | Next |
 
 ## History
 

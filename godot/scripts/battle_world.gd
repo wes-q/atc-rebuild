@@ -10,13 +10,13 @@ const SKY_SCALE := 100.0
 ## Map model space to Godot: undo Assimp's z mirror, HAHA_SCALE_VAL, then the plane mapping.
 const MAP_BASIS := Basis(Vector3(0.3, 0, 0), Vector3(0, -0.3, 0), Vector3(0, 0, 0.3))
 
-static var _hit_scene: PackedScene
-static var _explosion_scene: PackedScene
-static var _wall_crash_scene: PackedScene
-static var _fonts := {}
+static var _effect_scenes := {}
+const CHARACTER_EXPLO := "res://assets/original/fx/character_explo.gltf"
+const PART_EXPLOSION := "res://assets/original/fx/part_explosion.gltf"
+const SWORD_HIT := "res://assets/original/fx/sword_hit.gltf"
 const FONT_HIT := "res://assets/original/fx/font_hit.gltf"
 const FONT_DAMAGE := "res://assets/original/fx/font_damage.gltf"
-const FONT_TIME := 1.0 ## the particles' 1 s life (energy)
+const FONT_TIME := 1.2 ## the particles' 1 s life (energy), plus their 0.2 s emission
 
 ## Environment, light and camera. The arena comes from build_map.
 static func build(root: Node3D, depth: float) -> Dictionary:
@@ -137,130 +137,54 @@ static func place_sky(sky: Node3D, camera: Camera3D) -> void:
 ## Damage::put_image_only: weapon/font_hit.x (your shot landed) or font_damage.x (you were
 ## hit), placed with an identity matrix, so no scale and no rotation beyond the axis mapping.
 static func font_marker(root: Node3D, at: Vector2, hit: bool) -> void:
-	var path := FONT_HIT if hit else FONT_DAMAGE
-	if not _fonts.has(path):
-		_fonts[path] = load(path)
-	var fx := (_fonts[path] as PackedScene).instantiate() as Node3D
-	root.add_child(fx)
-	fx.transform = Transform3D(MechView.G * Basis.from_scale(Vector3(1, 1, -1)), Original.to_godot(at))
-	MechView.play_effect(fx, false)
-	# The visible part is the particle script named by the "p:" frame, riding on that frame.
-	# The burst (fonts_01) is drawn under the text (inferred: the layering is not traced).
-	var anchor: Node3D = fx
-	for n in fx.find_children("p*", "Node3D", true, false):
-		anchor = n
-		break
-	var script_name := "font_hit" if hit else "font_damage"
-	var layers := ParticleQuad.layers(script_name)
-	for i in layers.size():
-		anchor.add_child(ParticleQuad.from_layer(layers[i], layers.size() - i))
-	var timer := fx.get_tree().create_timer(FONT_TIME)
-	timer.timeout.connect(fx.queue_free)
+	spawn_effect(root, FONT_HIT if hit else FONT_DAMAGE, MechView.G * Basis.from_scale(Vector3(1, 1, -1)), at, FONT_TIME)
 
 ## rc_map::crashed_with_wall: weapon/wall_crash.x launched from the edge point, facing out
 ## along the wall normal with up toward the camera.
 static func wall_crash(root: Node3D, at: Vector2, normal: Vector2) -> void:
-	if _wall_crash_scene == null:
-		_wall_crash_scene = load(WALL_CRASH)
-	var fx := _wall_crash_scene.instantiate() as Node3D
-	root.add_child(fx)
 	var z := Vector3(normal.x, 0, normal.y).normalized()
 	var y := Vector3(0, -1, 0)
 	var x := y.cross(z).normalized()
 	var b := MechView.G * Basis(x, y, z) * Basis.from_scale(Vector3(1, 1, -1)) * Basis.from_scale(Vector3.ONE * Original.SCALE)
-	fx.transform = Transform3D(b, Original.to_godot(at))
-	MechView.play_effect(fx, false)
-	var timer := fx.get_tree().create_timer(1.0)
-	timer.timeout.connect(fx.queue_free)
+	spawn_effect(root, WALL_CRASH, b, at, 1.5)
 
-## Bullet impact, also used for the low-health sparks (rcPlayer::update part_explosion).
-static func hit_flash(root: Node3D, at: Vector2, size := 1.0) -> void:
-	if _hit_scene == null:
-		_hit_scene = load(HIT_FLASH)
-	var fx := _hit_scene.instantiate() as Node3D
+## An effect model (the_projectile_manager.add): its animation plays once and its particle
+## frames run their scripts. Freed after life seconds, when the scripts have run out.
+static func spawn_effect(root: Node3D, path: String, basis: Basis, at: Vector2, life := 2.0) -> Node3D:
+	if not _effect_scenes.has(path):
+		_effect_scenes[path] = load(path) if ResourceLoader.exists(path) else null
+	var scene: PackedScene = _effect_scenes[path]
+	if scene == null:
+		return null
+	var fx := scene.instantiate() as Node3D
 	root.add_child(fx)
-	fx.position = Original.to_godot(at)
-	fx.scale = Vector3.ONE * Original.SCALE * size
-	var tw := fx.create_tween()
-	tw.tween_property(fx, "scale", Vector3.ONE * Original.SCALE * size * 2.0, 0.25)
-	tw.tween_callback(fx.queue_free)
-
-## Zeid::damage(DAMAGE_EXPLOSION2_RESULT): explo2_result.x placed with matrixDefaultRotation
-## (RotZ 90, no scale), plus a particle burst standing in for character_explo.x, whose
-## particles are defined by script.
-static func knockout_explosion(root: Node3D, at: Vector2) -> void:
-	if _explosion_scene == null:
-		_explosion_scene = load(EXPLOSION)
-	var fx := _explosion_scene.instantiate() as Node3D
-	root.add_child(fx)
-	var b := MechView.G * Basis(Vector3(0, 0, 1), deg_to_rad(90)) * Basis.from_scale(Vector3(1, 1, -1))
-	fx.transform = Transform3D(b, Original.to_godot(at))
+	fx.transform = Transform3D(basis, Original.to_godot(at))
 	MechView.play_effect(fx, false)
-	var timer := fx.get_tree().create_timer(1.2)
+	ParticleFX.attach_all(fx, true)
+	var timer := fx.get_tree().create_timer(life)
 	timer.timeout.connect(fx.queue_free)
-
-	var burst := CPUParticles3D.new()
-	burst.one_shot = true
-	burst.amount = 70
-	burst.lifetime = 0.7
-	burst.explosiveness = 0.9
-	burst.direction = Vector3(0, 1, 0)
-	burst.spread = 180.0
-	burst.initial_velocity_min = 40.0
-	burst.initial_velocity_max = 140.0
-	burst.gravity = Vector3.ZERO
-	burst.damping_min = 40.0
-	burst.damping_max = 80.0
-	burst.mesh = _glow_quad(Color(1.0, 0.7, 0.35, 1.0), 14.0)
-	var ramp := Gradient.new()
-	ramp.set_color(0, Color(1, 1, 0.9, 1))
-	ramp.set_color(1, Color(1, 0.3, 0.1, 0))
-	burst.color_ramp = ramp
-	root.add_child(burst)
-	burst.position = Original.to_godot(at)
-	burst.emitting = true
-	burst.finished.connect(burst.queue_free)
-
-## Placeholder booster flame. The original's particle scripts come in a later milestone.
-static func booster_flame(point: Node3D) -> CPUParticles3D:
-	var fx := CPUParticles3D.new()
-	fx.emitting = false
-	fx.amount = 60
-	fx.lifetime = 0.22
-	fx.local_coords = false
-	fx.direction = Vector3(0, 0, 1)
-	fx.spread = 12.0
-	fx.initial_velocity_min = 90.0
-	fx.initial_velocity_max = 160.0
-	fx.gravity = Vector3.ZERO
-	fx.scale_amount_min = 1.0
-	fx.scale_amount_max = 1.8
-	fx.mesh = _glow_quad(Color(0.45, 0.8, 1.0, 0.9), 7.0)
-	var ramp := Gradient.new()
-	ramp.set_color(0, Color(1, 1, 1, 1))
-	ramp.set_color(1, Color(0.2, 0.5, 1.0, 0))
-	fx.color_ramp = ramp
-	point.add_child(fx)
 	return fx
 
-static func _glow_quad(color: Color, size: float) -> QuadMesh:
-	var quad := QuadMesh.new()
-	quad.size = Vector2(size, size)
-	var m := StandardMaterial3D.new()
-	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	m.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
-	m.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
-	m.albedo_color = color
-	m.vertex_color_use_as_albedo = true
-	var glow := GradientTexture2D.new()
-	glow.fill = GradientTexture2D.FILL_RADIAL
-	glow.fill_from = Vector2(0.5, 0.5)
-	glow.fill_to = Vector2(0.5, 0.0)
-	var g := Gradient.new()
-	g.set_color(0, Color(1, 1, 1, 1))
-	g.set_color(1, Color(1, 1, 1, 0))
-	glow.gradient = g
-	m.albedo_texture = glow
-	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	quad.material = m
-	return quad
+## Default placement for effect files: the axis mapping and HAHA_SCALE_VAL.
+static func effect_basis(scale := Original.SCALE) -> Basis:
+	return MechView.G * Basis.from_scale(Vector3(1, 1, -1) * scale)
+
+## A bullet's bullet_dead_xfile where it hit or ran out.
+static func hit_flash(root: Node3D, at: Vector2, path := HIT_FLASH) -> void:
+	spawn_effect(root, path, effect_basis(), at)
+
+## rcPlayer::update under 10% life: particle01/part_explosion.x at a random offset.
+static func low_health_spark(root: Node3D, at: Vector2) -> void:
+	spawn_effect(root, PART_EXPLOSION, effect_basis(1.0), at)
+
+## Zeid::damage(DAMAGE_EXPLOSION2_RESULT): anim/explo2_result.x placed with
+## matrixDefaultRotation (RotZ 90, no scale) and weapon/character_explo.x, whose particles
+## make the burst.
+static func knockout_explosion(root: Node3D, at: Vector2) -> void:
+	var b := MechView.G * Basis(Vector3(0, 0, 1), deg_to_rad(90)) * Basis.from_scale(Vector3(1, 1, -1))
+	spawn_effect(root, EXPLOSION, b, at, 2.5)
+	spawn_effect(root, CHARACTER_EXPLO, effect_basis(1.0), at, 2.5)
+
+## SwordEffectState::update: weapon/sword_hit.x at a mech the swing reached.
+static func sword_hit(root: Node3D, at: Vector2) -> void:
+	spawn_effect(root, SWORD_HIT, effect_basis(1.0), at)

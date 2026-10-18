@@ -54,6 +54,11 @@ var _me_alive := false
 var _me_low := false
 var _camera: Camera3D
 var _nearest_id := 0
+## Lock-on (Radar::render_lock_on_system): the current target, other candidates, and whether
+## another player has locked onto you.
+var lock_target_pos: Variant = null
+var lock_candidates: Array[Vector2] = []
+var locked_on_me := false
 var _weapons_set := false
 
 func _ready() -> void:
@@ -168,9 +173,11 @@ func refresh(sim: MechSim, me_name: String, status: String, round_time: float, c
 	time_update(round_time)
 	booster_update(int(sim.booster_gage), int(sim.energy_max), int(sim.energy_low_line))
 	self_user_state(ZEID_FACE, me_name, maxi(0, sim.life), 1)
-	weapon_update(sim.weapon.id, sim.recharge / sim.weapon.reload, sim.weapon.name)
-	weapon_number_show(0)
-	weapon_full_number_show(0)
+	weapon_update(sim.weapon.id, sim.recharge / sim.weapon.reload, sim.weapon.name, sim.weapon_index)
+	# get_my_ammo_number: -1 (no limit) shows as 0, like the ammo per load.
+	var slot: MechSim.Slot = sim.slots[sim.weapon_index]
+	weapon_number_show(maxi(0, slot.ammo))
+	weapon_full_number_show(maxi(0, slot.data.ammo))
 	if _user_state_time > 0.0:
 		_user_state_time -= dt
 		if _user_state_time <= 0.0:
@@ -239,10 +246,12 @@ func _initial_weapons(ids: Array) -> void:
 		weapon.w("item_slot_%d_img" % (i + 1)).texture_switch(ids[i])
 		weapon.w("item_slot_%d_img_selete" % (i + 1)).texture_switch(ids[i])
 
-## OnWeaponUpdate(weapon_id, recharging_time, weapon_name) for the SR-3 in slot 2: the
-## recharge ring steps through 16 images as the reload fills, the slot glows near the end.
-func weapon_update(weapon_id: int, ratio: float, weapon_name: String) -> void:
-	var slot := weapon.w("item_slot_2")
+## OnWeaponUpdate(weapon_id, recharging_time, weapon_name) for the selected slot (0 to 3):
+## the recharge ring steps through 16 images as the reload fills, the slot glows near the end,
+## and the selection mark moves to the slot.
+const SLOT_MARK_X := [161, 219, 276, 332]
+func weapon_update(weapon_id: int, ratio: float, weapon_name: String, slot_index: int) -> void:
+	var slot := weapon.w("item_slot_%d" % (slot_index + 1))
 	var ring := weapon.w("recharge_img")
 	slot.texture_switch(1)
 	ring.texture_switch(1)
@@ -258,16 +267,17 @@ func weapon_update(weapon_id: int, ratio: float, weapon_name: String) -> void:
 			break
 	weapon.w("weapon_img").texture_switch(weapon_id)
 	weapon.w("weapon_name").text_set(weapon_name)
-	weapon.w("item_selecte_mark").pos_set(219, 31)
+	weapon.w("item_selecte_mark").pos_set(SLOT_MARK_X[slot_index], 31)
 	for i in range(1, 7):
 		var img := weapon.w("item_slot_%d_img" % i)
 		if img:
-			img.visible = i != 2
+			img.visible = i != slot_index + 1
 		var sel := weapon.w("item_slot_%d_img_selete" % i)
 		if sel:
-			sel.visible = i == 2
-	for i in [1, 3, 4]:
-		weapon.w("item_slot_%d" % i).texture_switch(1)
+			sel.visible = i == slot_index + 1
+	for i in range(1, 5):
+		if i != slot_index + 1:
+			weapon.w("item_slot_%d" % i).texture_switch(1)
 
 ## game_fight_weapon_number_show and _full_number_show: ammo left and ammo per load. The
 ## SR-3 has no ammo limit, so the original showed 0000 / 0000.
@@ -337,6 +347,26 @@ func _draw_overlay() -> void:
 				overlay.draw_set_transform(t.hood_pos + Vector2(5, 5), -slope)
 				overlay.draw_texture_rect(tex, Rect2(Vector2(-5, -5), Vector2(10, 10)), false, TEAM0_COLOR)
 				overlay.draw_set_transform(Vector2.ZERO)
+	# Lock-on markers.
+	if locked_on_me:
+		var locked := OriginalUI.texture("ui/widget/game_fight/rader/fughtui_locked.png")
+		if locked:
+			overlay.draw_texture_rect(locked, Rect2(Vector2(400 - 55, 300 - 43), Vector2(110, 86)), false)
+	if lock_target_pos != null:
+		var lt := _to_screen(lock_target_pos)
+		var lockon := OriginalUI.texture("ui/widget/game_fight/rader/fughtui_lockon.png")
+		if lockon:
+			overlay.draw_texture_rect(lockon, Rect2(lt - Vector2(59, 43.5), Vector2(118, 87)), false)
+		if lt.x < 0 or lt.x > SCREEN.x or lt.y < 0 or lt.y > SCREEN.y:
+			var slope := atan2((lock_target_pos as Vector2).y - _me.y, (lock_target_pos as Vector2).x - _me.x)
+			var hp := HOOD_CENTRE + Vector2(cos(slope), -sin(slope)) * HOOD_RANGE - Vector2(15, 30)
+			var hud_mark := OriginalUI.texture("ui/widget/game_fight/rader/fughtui_lockon_hud.png")
+			if hud_mark:
+				overlay.draw_texture(hud_mark, hp)
+	var locking := OriginalUI.texture("ui/widget/game_fight/rader/fughtui_locking.png")
+	if locking:
+		for c in lock_candidates:
+			overlay.draw_texture_rect(locking, Rect2(_to_screen(c) - Vector2(44, 37), Vector2(88, 74)), false)
 	# Under 10% life, SPAttack.png pulses below your mech.
 	if _me_low and _me_alive:
 		var warn := OriginalUI.texture("ui2/game_fight/spattack.png")

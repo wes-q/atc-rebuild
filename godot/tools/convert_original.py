@@ -34,6 +34,20 @@ ASSETS = [
     ("weapon/wall_crash.X", "fx/wall_crash"),
     ("weapon/font_hit.X", "fx/font_hit"),
     ("weapon/font_damage.X", "fx/font_damage"),
+    # Slot 1, Dagger Type 1 (Weapon_28): its swing clips, the Zeid's sword stance moves, the blade.
+    ("anim03/Dagger.x", "zeid/dagger"),
+    ("middle_character/zeid/zeid_weapon01_middle.x", "zeid/zeid_weapon01"),
+    ("middle_character/zeid/zeid_weapon01_move_middle.x", "zeid/zeid_weapon01_move"),
+    ("item01/1st/black_dagger_test.X", "zeid/dagger_model"),
+    ("weapon/sword_hit.X", "fx/sword_hit"),
+    # Slot 3, MML Type 1 (Weapon_4): launcher stance and the launcher.
+    ("weapon/mistale_02.X", "zeid/missile_mml"),
+    ("weapon/mistale_boom_02.X", "fx/missile_boom"),
+    ("weapon/character_explo.x", "fx/character_explo"),
+    ("particle01/part_explosion.x", "fx/part_explosion"),
+    ("middle_character/zeid/zeid_weapon03_middle.x", "zeid/zeid_weapon03"),
+    ("middle_character/zeid/zeid_weapon03_move_middle.x", "zeid/zeid_weapon03_move"),
+    ("anim/zeid3.X", "zeid/launcher_mml"),
 ]
 
 # Battle sounds, named as the code plays them (NubAudiere::play adds ".ogg"). Relative to bin/.
@@ -44,6 +58,12 @@ SOUNDS = [
     "sound/sp_booster",            # on_booster: a boost starts
     "sound/special_fire",          # rc_map::crashed_with_wall
     "sound/common/bomb-complete",  # on_robot_explosion
+    "sound/blade_start",           # Dagger sound_file[0]: weapon change
+    "sound/blade_Hit",             # Dagger sound_file[1]: a swing lands
+    "sound/blade_att",             # Dagger sound_file[2]: each swing
+    "sound/missile_start",         # MML sound_file[0]: weapon change
+    "sound/missile Hit",           # MML sound_file[1]: a missile lands
+    "sound/missile_fire",          # MML sound_file[2]: each missile
 ]
 
 # BGM::load play list in index order. A match plays rand() % 19; 19 is victory, 23 defeat.
@@ -167,6 +187,13 @@ def convert(data_dir: pathlib.Path, out_dir: pathlib.Path, rel: str, out_name: s
         gltf["animations"] = kept
     else:
         gltf.pop("animations", None)
+
+    # A frame named "p<group>:<script>,<script>" carries particle scripts (Model::frame_create).
+    # Godot drops ':' from node names, so it becomes '~' to keep the name readable.
+    for node in gltf.get("nodes", []):
+        name = node.get("name", "")
+        if name.startswith("p") and ":" in name:
+            node["name"] = name.replace(":", "~")
 
     out.write_text(json.dumps(gltf, ensure_ascii=False, indent=1), encoding="utf-8")
     anims = [(a.get("name"), len(a["channels"])) for a in gltf.get("animations", [])]

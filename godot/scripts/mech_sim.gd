@@ -12,7 +12,8 @@ class Intent:
 	var up := false
 	var down := false
 	var boost := false ## right mouse button
-	var fire := false ## left mouse button
+	var fire := false ## left mouse button, held state; attacks start on the press
+	var weapon_key := 0 ## number key held this frame, 1 to 4, or 0
 	var aim := Vector2.ZERO ## point under the mouse, on the plane
 
 	func move_dir() -> Vector2:
@@ -23,6 +24,12 @@ class Intent:
 		return left or right or up or down
 
 signal fired(origin: Vector2, deg: int)
+## A burst of bullets starts (pt_send_shoot): the moment a guided weapon takes its target.
+signal attack_started(slot: int)
+## A sword swing starts: swing is the attack clip index, 2, 3 or 4 (ComboSystem).
+signal swung(slot: int, swing: int)
+## rcPlayer::change_weapon
+signal weapon_changed(slot: int)
 ## Fully destroyed: is_dead_complete in rcPlayer::update_dead. The mech stops being drawn.
 signal exploded
 ## Pushed back off the arena edge (rc_map::crashed_with_wall), for the wall_crash effect.
@@ -33,7 +40,23 @@ signal boost_started
 
 # Stats from the original database, via GameData.
 var stats: GameData.Robot
-var weapon: GameData.Weapon
+## One equipped weapon in its first mode (rc_Weapon): its data, recharge and ammo.
+class Slot:
+	var data: GameData.Weapon
+	var recharge := 0.0
+	var ammo := -1
+
+	func _init(w: GameData.Weapon) -> void:
+		data = w
+		reset()
+
+	func reset() -> void:
+		recharge = data.reload
+		ammo = data.ammo
+
+	## rc_Weapon::is_recharged: within 0.01 s of full.
+	func is_ready() -> bool:
+		return absf(data.reload - recharge) < 0.01
 var move_speed: float
 var booster_speed: float
 var booster_init_speed: float
@@ -80,16 +103,37 @@ var _booster_input := BoosterInput.NOTHING
 var _prev_keys := [false, false, false, false]
 
 # Weapon (rcWeaponMode, rc_Weapon::update_bullet). Starts charged.
-var recharge := 0.0
+## Weapon slots 1 to 4 (RobotInfo default weapons). Slot 4 is the shield, not usable yet.
+var slots: Array[Slot] = []
+var weapon_index := Original.START_WEAPON
+## The selected weapon's data and recharge.
+var weapon: GameData.Weapon:
+	get:
+		return slots[weapon_index].data
+var recharge: float:
+	get:
+		return slots[weapon_index].recharge
+	set(v):
+		slots[weapon_index].recharge = v
 var _burst_left := 0
 var _burst_timer := 0.0
 var _attack_time := 0.0
 var attacking := false
 
-## body: RobotInfo name. weapon_slot: index into its default weapons (1 = second slot).
-func _init(body := "zeid", weapon_slot := 1) -> void:
+# Sword combo (ComboSystem): the swing playing, whether one more is queued, time left in it.
+var combo_active := false
+var combo_index := 0
+var _combo_queued := false
+var _swing_time := 0.0
+var _prev_fire := false
+var _prev_weapon_key := 0
+
+## body: RobotInfo name. weapon_slot: the slot selected at the start (the SR-3 for the Zeid).
+func _init(body := "zeid", weapon_slot := Original.START_WEAPON) -> void:
 	stats = GameData.robot(body)
-	weapon = GameData.weapon(stats.weapons[weapon_slot])
+	for i in 4:
+		slots.append(Slot.new(GameData.weapon(stats.weapons[i])))
+	weapon_index = weapon_slot
 	move_speed = stats.move_speed
 	booster_speed = stats.booster_speed
 	booster_init_speed = stats.booster_init_speed
@@ -104,7 +148,6 @@ func _init(body := "zeid", weapon_slot := 1) -> void:
 	life_max = stats.life
 	life = life_max
 	booster_gage = energy_max
-	recharge = weapon.reload
 
 # Death (rcPlayer::update_dead). life <= 0 stops the mech and blocks input; 0.1 s later
 # (time_to_dead_complete) it is fully destroyed.
@@ -130,7 +173,7 @@ func step(intent: Intent, dt: float) -> void:
 	_update_physics(dt)
 	_update_dash(intent)
 	_update_map()
-	_update_rifle(intent, dt)
+	_update_weapons(intent, dt)
 	booster_warning_time = maxf(0.0, booster_warning_time - dt)
 
 ## Returns true while dead, so nothing else runs.
@@ -143,6 +186,7 @@ func _update_dead(dt: float) -> bool:
 		_send_move(0, 0)
 		_burst_left = 0
 		attacking = false
+		combo_active = false
 		_last_vel = 0.0
 	if not is_dead_complete:
 		_dead_time -= dt
@@ -322,28 +366,92 @@ func _update_map() -> void:
 	start_dash(BattleMap.wall_bounce_target(crash))
 	wall_crashed.emit(crash["point"], crash["normal"])
 
-## rcWeaponMode::fire queues continuous_number bullets, each continuous_time after the last
-## (rc_Weapon::update_bullet). Recharge waits re_load_time and pauses during the fire animation.
-func _update_rifle(intent: Intent, dt: float) -> void:
+## rcPlayerManager::update_my_input, number keys: change weapon on the key press, unless the
+## fire button is held, a burst is still going out, or a combo is playing.
+func _update_weapon_switch(intent: Intent) -> void:
+	var key := intent.weapon_key
+	var pressed := key != 0 and key != _prev_weapon_key
+	_prev_weapon_key = key
+	if not pressed or intent.fire or _burst_left > 0 or combo_active:
+		return
+	var slot := key - 1
+	if slot < 0 or slot >= slots.size() or slots[slot].data.weapon_type == Original.WEAPON_TYPE_SHIELD:
+		return
+	if slot != weapon_index:
+		weapon_index = slot
+		weapon_changed.emit(slot)
+
+## Weapons, following rc_Weapon::update_bullet, rcWeaponMode::fire and ComboSystem::update.
+## An attack starts on the button press, not while it is held. Every weapon recharges,
+## selected or not, except while the mech is attacking.
+func _update_weapons(intent: Intent, dt: float) -> void:
+	var press := intent.fire and not _prev_fire
+	_prev_fire = intent.fire
+	_update_weapon_switch(intent)
+	var slot := slots[weapon_index]
+	# Bullets queued by the last shot leave continuous_time apart.
 	if _burst_left > 0:
 		_burst_timer -= dt
 		while _burst_left > 0 and _burst_timer <= 0.0:
+			if slot.ammo == 0:
+				_burst_left = 0
+				break
+			if slot.ammo > 0:
+				slot.ammo -= 1
+			_spend(slot.data.cost_energy)
 			fired.emit(pos, facing)
 			_burst_left -= 1
 			if _burst_left > 0:
-				_burst_timer += weapon.fire_interval
-	if attacking:
+				_burst_timer += slot.data.fire_interval
+	if combo_active:
+		_swing_time -= dt
+		if _swing_time <= 0.0:
+			if _combo_queued:
+				_combo_queued = false
+				combo_index += 1
+				_swing(slot)
+			else:
+				combo_active = false
+				attacking = false
+	elif attacking:
 		_attack_time -= dt
 		if _attack_time <= 0.0 and _burst_left == 0:
 			attacking = false
+	if not attacking:
+		for sl in slots:
+			sl.recharge = minf(sl.recharge + dt, sl.data.reload)
+	if not press:
 		return
-	recharge = minf(recharge + dt, weapon.reload)
-	if intent.fire and recharge >= weapon.reload:
-		recharge = 0.0
-		attacking = true
-		_attack_time = Original.ATTACK_TIME
-		_burst_left = weapon.fire_num
-		_burst_timer = weapon.fire_interval
+	if slot.data.is_sword():
+		# combo_shoot: a click during a swing queues the next one, up to the third (index 4).
+		if combo_active:
+			if not _combo_queued and combo_index != Original.SWORD_LAST_SWING:
+				_combo_queued = true
+		elif slot.is_ready():
+			combo_active = true
+			combo_index = Original.SWORD_FIRST_SWING
+			_swing(slot)
+		return
+	if attacking or not slot.is_ready() or slot.ammo == 0:
+		return
+	slot.recharge = 0.0
+	attacking = true
+	_attack_time = Original.ATTACK_TIME
+	# shoot() limits the burst to the ammo left.
+	_burst_left = slot.data.fire_num if slot.ammo < 0 else mini(slot.data.fire_num, slot.ammo)
+	_burst_timer = slot.data.fire_interval
+	attack_started.emit(weapon_index)
+
+func _swing(slot: Slot) -> void:
+	slot.recharge = 0.0
+	attacking = true
+	_swing_time = Original.SWORD_SWING_TIMES[combo_index - Original.SWORD_FIRST_SWING]
+	_spend(slot.data.cost_energy)
+	swung.emit(weapon_index, combo_index)
+
+## booster_gage -= cost_energy for each bullet or swing, floored at 0.
+func _spend(amount: float) -> void:
+	booster_gage = maxf(0.0, booster_gage - amount)
 
 func _is_moving() -> bool:
 	return vel_scalar > 0.0 or move_dir != Vector2.ZERO
@@ -378,7 +486,7 @@ var _has_snapshot := false
 ## Owner's state, sent every physics tick.
 func snapshot() -> Array:
 	return [pos.x, pos.y, facing, move_dir.x, move_dir.y, _last_vel, int(acc_flag),
-		speed_state, int(attacking), life, booster_gage, int(is_dead_complete)]
+		speed_state, int(attacking), life, booster_gage, int(is_dead_complete), weapon_index]
 
 ## Applies an owner's snapshot to a remote copy.
 func apply_snapshot(s: Array) -> void:
@@ -397,6 +505,9 @@ func apply_snapshot(s: Array) -> void:
 	booster_gage = float(s[10])
 	is_dead = life <= 0
 	is_dead_complete = s.size() > 11 and int(s[11]) != 0
+	if s.size() > 12 and int(s[12]) != weapon_index:
+		weapon_index = int(s[12])
+		weapon_changed.emit(weapon_index)
 	if not _has_snapshot:
 		pos = real_pos
 		_has_snapshot = true
@@ -422,9 +533,15 @@ func reset_at(spawn: Vector2, face: int) -> void:
 	is_dead = false
 	is_dead_complete = false
 	booster_gage = energy_max
-	recharge = weapon.reload
+	for sl in slots:
+		sl.reset()
+	weapon_index = Original.START_WEAPON
 	_burst_left = 0
 	attacking = false
+	combo_active = false
+	_combo_queued = false
+	_prev_fire = false
+	_prev_weapon_key = 0
 	_booster_input = BoosterInput.NOTHING
 	_prev_keys = [false, false, false, false]
 	previous_pos = spawn

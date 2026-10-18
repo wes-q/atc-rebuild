@@ -39,9 +39,24 @@ class Weapon:
 	var life: float
 	var reload: float ## re_load_time, seconds
 	var crash_radius: float
+	var weapon_type: int ## 1 sword (HIT_TYPE_SWORD), 2 bullet, 5 shield
+	var collision_degree: float ## sword arc, whole angle in degrees
+	var collision_checker: int ## 1 the attacker decides the damage, 2 the one hit does
+	var ammo: int ## -1 when the weapon has no ammo limit
+	var cost_energy: float ## booster gauge spent per bullet or swing (rc_Weapon::update_bullet)
+	var guided_flag: int ## homing strength, 0 for none
+
+	func is_sword() -> bool:
+		return weapon_type == 1
+
+	func is_guided() -> bool:
+		return guided_flag > 0
 
 static func _byte(v: float) -> int:
 	return clampi(int(v), 0, 255)
+
+static func _num(v: Variant) -> float:
+	return 0.0 if v == null else float(v)
 
 static func _load(table: String) -> Array:
 	var path := DATA_DIR + table + ".json"
@@ -84,12 +99,19 @@ static func weapon(id: int) -> Weapon:
 	var s := Weapon.new()
 	s.id = id
 	s.name = w.name
-	s.damage = int(w.damage)
-	s.fire_num = int(w.continuous_number)
+	s.damage = int(_num(w.damage))
+	s.fire_num = int(_num(w.continuous_number))
 	# copy_weapon_data_to_net then rcWeaponMode / rc_bullet: BYTE(x/10)*10/1000, BYTE(x/100)*100/1000.
-	s.fire_interval = _byte((w.continuous_time if w.continuous_time != null else 0) / 10.0) * 10.0 / 1000.0
-	s.life = _byte(w.life_time / 100.0) * 100.0 / 1000.0
-	s.reload = _byte(w.re_load_time / 100.0) * 100.0 / 1000.0
-	s.bullet_speed = _byte(w.bullet_speed / 100.0) * Original.VEL_SCALE * 100.0
-	s.crash_radius = float(w.collision_area) * Original.VEL_SCALE
+	s.fire_interval = _byte(_num(w.continuous_time) / 10.0) * 10.0 / 1000.0
+	s.life = _byte(_num(w.life_time) / 100.0) * 100.0 / 1000.0
+	s.reload = _byte(_num(w.re_load_time) / 100.0) * 100.0 / 1000.0
+	s.bullet_speed = _byte(_num(w.bullet_speed) / 100.0) * Original.VEL_SCALE * 100.0
+	# NetWeaponData2::set: collision_area *= HAHA_SCALE_VAL * 1.1; the arc angle is not scaled.
+	s.crash_radius = _num(w.collision_area) * Original.VEL_SCALE
+	s.weapon_type = int(_num(w.weapon_type))
+	s.collision_degree = _num(w.collision_degree)
+	s.collision_checker = int(_num(w.collision_checker))
+	s.ammo = int(w.ammo) if w.ammo != null and int(w.ammo) > 0 else -1
+	s.cost_energy = _num(w.cost_energy)
+	s.guided_flag = int(_num(w.guided_flag))
 	return s
