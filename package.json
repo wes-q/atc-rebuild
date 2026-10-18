@@ -1,0 +1,26 @@
+{
+  "name": "atc-raycrash",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Local two-player recreation of ATC Raycrash. Milestone 1 prototype.",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "node src/server/main.ts",
+    "bot": "node tools/bot.ts",
+    "test": "node --test \"src/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit",
+    "clip": "node tools/clip.ts"
+  },
+  "dependencies": {
+    "ws": "8.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.1",
+    "@types/ws": "8.18.2",
+    "typescript": "6.0.3",
+    "vite": "8.3.2"
+  }
+}

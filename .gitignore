@@ -1,0 +1,8 @@
+# Dependencies and build output
+node_modules/
+dist/
+.DS_Store
+
+# Private material: the RageZone archive, recorded clips, converted original art
+RaycrashArchive/
+clips/

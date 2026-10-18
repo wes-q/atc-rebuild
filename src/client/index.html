@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ATC Raycrash</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <canvas id="view"></canvas>
+
+    <div id="hud">
+      <!-- Top left: portrait badge, score, level -->
+      <div class="hud-tl">
+        <div class="badge"><svg viewBox="0 0 40 40" aria-hidden="true">
+          <path d="M8 30 L12 12 L22 6 L32 12 L34 26 L26 34 L14 34 Z" fill="#cfd8e6" stroke="#20314f" stroke-width="2"/>
+          <path d="M14 18 L28 16 L27 21 L15 23 Z" fill="var(--accent)"/>
+          <path d="M8 30 L4 36 L14 34 Z" fill="#ff8a2a"/>
+        </svg></div>
+        <div class="score" id="score">0000</div>
+        <div class="lv"><span>Lv</span><span id="pname">Player</span></div>
+      </div>
+
+      <div class="hud-timer" id="timer">03:00:00</div>
+      <div class="hud-fslots"><div>F1</div><div>F2</div><div>F3</div></div>
+      <canvas class="hud-minimap" id="minimap" width="190" height="80"></canvas>
+
+      <!-- Left edge: boost gauge -->
+      <div class="hud-boost">
+        <div class="boost-val" id="boost-val">100</div>
+        <div class="boost-track"><div class="boost-fill" id="boost-fill"></div></div>
+        <div class="overheat" id="overheat">OVER HEAT!</div>
+      </div>
+
+      <!-- Bottom left: weapon ring, name, ammo, slots -->
+      <div class="hud-weapon">
+        <div class="ring"><div class="ring-inner"><svg viewBox="0 0 60 24" aria-hidden="true">
+          <path d="M2 10 H40 L46 6 H58 V14 H46 L42 18 H22 L18 22 H10 L12 14 H2 Z" fill="#eef4ff"/>
+        </svg></div></div>
+        <div class="weapon-panel">
+          <div class="weapon-name" id="weapon-name">Heavy Machinegun</div>
+          <div class="ammo" id="ammo">0600 / 0600</div>
+        </div>
+        <div class="slots">
+          <div class="slot" id="slot-gun"><svg viewBox="0 0 30 12"><path d="M1 4 H20 L24 2 H29 V7 H23 L21 10 H11 L12 7 H1 Z" fill="currentColor"/></svg></div>
+          <div class="slot" id="slot-blade"><svg viewBox="0 0 30 12"><path d="M2 9 L24 3 L29 2 L26 6 L4 11 Z" fill="currentColor"/></svg></div>
+          <div class="slot off"><svg viewBox="0 0 30 12"><path d="M3 6 L10 2 H26 L29 6 L26 10 H10 Z" fill="currentColor"/></svg></div>
+          <div class="slot off"><svg viewBox="0 0 30 12"><circle cx="15" cy="6" r="4.5" fill="currentColor"/></svg></div>
+        </div>
+        <div class="hp-track"><div class="hp-fill" id="hp-fill"></div><div class="hp-text" id="hp-text">1000</div></div>
+      </div>
+
+      <!-- Lock-on ring follows the target on screen -->
+      <div class="lock" id="lock">
+        <div class="lock-ring"></div>
+        <div class="lock-tri"></div>
+        <div class="lock-info">
+          <div class="lock-name" id="lock-name">Player</div>
+          <div class="lock-bars"><div class="bar"><div id="lock-hp"></div></div><div class="bar boost"><div id="lock-boost"></div></div></div>
+          <div class="lock-dist" id="lock-dist">0m</div>
+        </div>
+      </div>
+      <div class="crosshair" id="crosshair"></div>
+
+      <div id="pops"></div>
+      <div class="center-msg" id="center-msg"></div>
+      <div class="sub-msg" id="sub-msg"></div>
+
+      <div class="help" id="help">
+        <b>A D</b> move &nbsp; <b>W / Space</b> jump, hold to hover &nbsp; <b>S</b> drop<br />
+        <b>Shift</b> + direction dash &nbsp; <b>Click / J</b> fire &nbsp; <b>Right click / K</b> slash<br />
+        <b>Tab</b> lock on or off, mouse aims when off &nbsp; <b>H</b> hide
+      </div>
+    </div>
+
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,6 @@
+# Godot
+.godot/
+export/
+
+# Converted original CodiNET art and data: private, never commit
+assets/original/
