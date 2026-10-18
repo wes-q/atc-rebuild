@@ -39,8 +39,8 @@ The game opens on the original's screens, in English, built from its window tabl
 3. **Main menu:** MATCH, TUTORIAL, ITEM SHOP, CHANNEL, OPTION and EXIT down the left, the
    chat console in the middle (normal, whisper and clan tabs, the chat line, scrolling), the
    channel's player list and the friend and clan lists on the right.
-   - MATCH and ITEM SHOP open the classic menu (host, join, map, mode, loadout) until the
-     original room list (step 14) and shop page (step 15) replace it. TUTORIAL starts practice.
+   - MATCH opens the room list (below). ITEM SHOP opens the classic menu, where the loadout
+     is chosen, until the original shop page (step 15) replaces it. TUTORIAL starts practice.
    - CHANNEL opens the channel box, pre-filled "raycrash-"; EXIT goes back to character select.
    - The console shows your own lines and the front end's notices; there is no server to chat
      through yet.
@@ -71,26 +71,77 @@ How it behaves, from the engine:
 Open a screen directly for testing: `godot --path godot -- front=character` (or `main`,
 `option`); `-- classic` opens the classic menu.
 
-## Multiplayer: up to 12, free-for-all or teams
+## Room list and game room (Step 14, from `page_custom_game.lua`, `page_game_room.lua` and
+the `res/custom_game_*.lua` and `res/game_room_*.lua` window tables)
 
-Start the game on computers on the same network. One picks the mode (free-for-all or team
-battle) and chooses **Host a match**; the others type the host's address and choose
-**Join**. The host's screen shows its address and who is in. When everyone has joined, the
-host presses **Enter** to start. You can skip the menu from the command line:
+MATCH opens the original room list; a room is a game someone hosts, and the game room is
+where its players gather between battles.
+
+**Room list** (`page_custom_game`):
+- The rows list the rooms hosted on the local network: number, name, the lock and beginner
+  icons, SINGLE or TEAM, Waiting, Playing, Beginner Room or FULL, and players out of 12.
+  Twelve rows a page, with the arrows for more.
+- Click a row to choose it, click it again (or ENTER) to go in. A locked room asks for its
+  password first.
+- The type button cycles all, single and team rooms; the status button all, waiting and
+  playing (as `PushtypeEvent` and `PushStatusEvent` did). REFRESH clears both and the list.
+- **Quick Go:** a room number, or a room name, and a password. A name that is no listed
+  room but reads as an address (`192.168.1.20`, `100.64.0.7`, `mypc.local`) joins that host
+  directly, which also works where the list cannot see a room.
+- QUICK JOIN enters the first waiting room with space and no password.
+- CREATE opens the original box: room name (up to 20 letters, no space at either end),
+  password (up to 15), SINGLE or TEAM, and the beginner switch, which starts on for a new
+  pilot as it did for grade 5 and below. Creating a room hosts it on port 7777.
+- EXIT goes back to the channel (the main menu).
+
+**Game room** (`page_game_room`):
+- The information bar (room number as the list showed it, name, SINGLE or TEAM, Waiting or
+  Playing, Beginner Room), the arena banner and twelve slots: 1-6 on the left, 7-12 on the
+  right, red and blue in team battle with the VS mark and the team marks.
+- Each slot shows the player's face for their body, name (yours in yellow), PVT grade, the
+  room master's mark and PLAYING while they are in a battle.
+- Click an empty slot to move there; in team battle that changes sides (`ChangeTeamSlot`).
+  **T** still moves you to the first free slot on the other side.
+- The room master has the arena arrows and START. START needs two players, and even sides
+  in team battle (the original's messages otherwise), then counts down in the chat: "5
+  seconds remaining" to 1, each with the original countdown sound. START again calls it off
+  ("Start is cancled", the original's spelling). Enter does the same as START.
+- The battle opens with the original READY and GO shrinking away and `ready go.ogg`. After
+  the results everyone goes back to the room.
+- Room chat goes to everyone in the room: "name : message", yours in yellow, with System
+  notices in green when someone comes in or leaves (the original's "is come in" and "is out
+  of the room").
+- Exit (or Esc, or Android's back button) leaves for the room list.
+- Someone who comes in during a battle waits in the room for the next one.
+
+How it maps onto the network (this recreation's own, as the rooms lived on CodiNET's server):
+- The room master's machine is the room: creating a room starts the host, and going in joins
+  it. If the master leaves, the room closes and everyone goes back to the room list (the
+  original passed the master's mark on instead).
+- A host announces its room once a second by UDP broadcast on port 7778; the room list
+  listens there. A second copy on the same computer cannot listen as well, so it says to
+  type the address instead.
+- Joining sends your name, body and the password you typed; the host checks the password
+  and room space and answers with the room or the reason ("Wrong password.", "The Room is
+  full."). The password never leaves the host.
+- The master's own addresses appear in the room chat when the room opens, for anyone to
+  type into Quick Go.
+
+The command line skips the menus:
 
 ```
-godot --path godot -- host                  # player 1, listens on port 7777
+godot --path godot -- host                  # a room on port 7777, named "<you>'s room"
 godot --path godot -- host teams            # the same, as a team battle
-godot --path godot -- join 192.168.1.20     # another player, with the host's address
+godot --path godot -- join 192.168.1.20     # into the room at that address
 godot --path godot -- practice              # alone, against a target dummy
 ```
 
+## Multiplayer: up to 12, free-for-all or teams
+
 - **Room** (`srv_rcroom.cpp`): 12 places, the host included. Players take the first free
   slot in free-for-all. In team battle slots 1-6 are red and 7-12 blue, and a joiner goes
-  to the smaller side (red when level). Between rounds, **T** moves you to the first free
-  slot on the other side.
+  to the smaller side (red when level).
 - **Starting** (`page_game_room.lua`): needs two players, and equal sides in team battle.
-  Someone who joins mid-round sits out until the next round starts.
 - **Start points** (the server's `start_point` table): free-for-all draws from all 12 points,
   red from points 1-6 and blue from 7-12, never two on one point. The blue draw leans to the
   first blue point, as the server's did. Everyone starts facing 0 degrees: the server sent
@@ -107,7 +158,7 @@ godot --path godot -- practice              # alone, against a target dummy
   keyboard and mouse. It is useful for testing.
 - Colour schemes go by slot, cycling the body's original three. The original took them
   from each player's paint item, which this recreation does not have.
-- Esc leaves the match and returns to the menu.
+- Esc leaves the room for the room list.
 
 How it works, following the original client: each player runs their own mech and sends its
 state 60 times a second, tagged with the round so a late state from the last round cannot
@@ -132,8 +183,8 @@ everyone. Remote mechs glide toward their reported position the way the original
 - Results show kills, damage dealt and points (damage / 10 x 0.825, the server's formula at
   equal grades, doubled in a free-for-all that started with three or more), plus rounds won
   this session.
-- The next round starts automatically 6 seconds after the results. This part is the
-  recreation's own: the original sent players back to a room lobby.
+- 6 seconds after the results a networked game goes back to the game room, as the
+  original did. Practice starts its next round instead.
 
 ## Arenas (from `test_map.lua`, `rcmap.cpp` and the server)
 
@@ -219,8 +270,9 @@ frames a second (run the window with `--max-fps 60 --always-on-top`, or it runs 
 stalls when covered). `--write-movie` records sound as well. For practice: `dummy_guard` has the
 target raise its guard whenever it can, `dummy_near=200` starts it that far in front of you.
 For the autopilot: `slot=4` keeps it on one weapon, `autoguard` guards 2 s in every 8, `combos`
-enters both command combos with a sword. For hosting: `players=4` starts the match once four
-are in, `tab` keeps the Tab panel open.
+enters both command combos with a sword. For hosting: `players=4` starts the countdown once
+four are in (and again after each battle), `room=<name>` names the room, `tab` keeps the Tab
+panel open. `name=<player>` plays under another name without saving it.
 
 ## Controls (as in the original)
 
@@ -266,9 +318,11 @@ private play, never a store, and it is git-ignored like the art.
   Between rounds the host gets START and, in team battle, everyone gets TEAM.
 - **Command combos:** flick the left stick toward your facing, then fire; or away, toward,
   fire. Each within 0.2 s, as on the keyboard.
-- Android's back button leaves a match for the menu, and quits from the menu.
+- Android's back button leaves a match (for the room list, or the menu from practice), and
+  quits from login.
 - Phones on the same Wi-Fi host and join each other, and play with desktops, exactly as on
-  the desktop.
+  the desktop. Some phones do not pass broadcasts to apps (inferred), so a room may be
+  missing from a phone's room list; Quick Go with the host's address always works.
 - The HUD keeps the original 4:3 layout in the middle of the screen; on a wide phone the
   sticks and buttons sit beside it.
 
@@ -551,6 +605,11 @@ parts added to the base stats.
   original used whichever its collision library reported first.
 - Light strengths are matched by eye; Direct3D's fixed-function lighting has no exact
   Godot equivalent.
+- The game room has no watch mode (the observer arrows are hidden), no waiting list or
+  invitations, no master's room options (renaming, changing the password) and no NPC slots.
+  Slots cannot be closed. The ping lights stay dark, and the team averages show 0.
+- The results screen keeps this recreation's panel; the original's result page with its
+  GAME ROOM and CHANNEL buttons is not built yet.
 - NPCs, observers, money, grades and paint items are not in yet. Points leave out the
   grade-based team averages and loser penalties, which need grades.
 - No lag compensation. Fine on a home network, untested over the internet.
@@ -573,8 +632,9 @@ scripts/game.gd          modes, networking, rounds, hits, camera, target dummy, 
 scripts/battle_world.gd  scenery and effects: arena, sky, lights, booster flames, hits, wall crash, explosion
 scripts/battle_map.gd    an arena's bounds, start points, lights and the edge bounce
 scripts/map_collision.gd wall triangles on a plane grid: sphere and segment tests
-scripts/start_menu.gd    the classic practice, host and join menu (behind MATCH and ITEM SHOP for now)
-scripts/front_end.gd     the original's login, character select, main menu and options
+scripts/start_menu.gd    the classic practice, host, join and loadout menu (behind ITEM SHOP for now)
+scripts/front_end.gd     the original's login, character select, main menu, options, room list and game room
+scripts/lan_rooms.gd     rooms announced and heard on the local network
 scripts/touch_controls.gd on-screen sticks and buttons for phones
 scripts/hud.gd           the original battle HUD: dialogs, radar, markers, name tags
 scripts/original_ui.gd   the engine's UI windows, built from the exported Lua tables
@@ -586,6 +646,7 @@ tools/inspect_import.gd     prints an imported model's tree and clips
 tools/render_poses.gd       renders the mech at several facings
 tools/render_map.gd         renders an arena from above with its walls, bounds and start points
 tools/ui_demo.gd            drives the front end with synthetic input, for checking it
+tools/room_demo.gd          joins a room another copy hosts, through the room list, with synthetic input
 tools/extract_ui.py         reads the HUD window tables and particle scripts, copies their art
-tests/test_mech_sim.gd      231 checks against the original database values and rules
+tests/test_mech_sim.gd      263 checks against the original database values and rules
 ```

@@ -1,20 +1,35 @@
 class_name FrontEnd
 extends CanvasLayer
 ## The original's front end, from its Lua pages: login (page_login_new.lua), the loading
-## screen, character select (page_charactor.lua), the main menu (page_main_menu.lua) and the
-## options page (page_main_menu_option.lua). The windows come from the exported resource
-## tables and are drawn by OriginalUI in the original's 800x600 layout, scaled to the window.
+## screen, character select (page_charactor.lua), the main menu (page_main_menu.lua), the
+## options page (page_main_menu_option.lua), the room list (page_custom_game.lua) and the game
+## room (page_game_room.lua). The windows come from the exported resource tables and are
+## drawn by OriginalUI in the original's 800x600 layout, scaled to the window.
 ##
 ## What needed CodiNET's servers is mapped onto this recreation:
 ## - Login asks for a player name; the password box is ignored.
 ## - Character select shows the five bodies in turn instead of a server's character list.
-## - The chat console shows your own messages and the front end's notices.
-## - Battle and Shop lead to the classic menu (host, join, loadout) until the room list
-##   (step 14) and shop page (step 15) replace it. Tutorial starts practice.
+## - The main menu's chat console shows your own messages and the front end's notices.
+## - The room list shows the rooms hosts announce on the local network (LanRooms), and the
+##   quick-go name box also takes a host's address. Creating a room hosts it.
+## - The game room is run by the game (scripts/game.gd), which hands this page what to show
+##   and hears its buttons through the room_* signals.
+## - Shop leads to the classic menu (loadout) until the shop page (step 15) replaces it.
+##   Tutorial starts practice.
 
 signal practice_requested
 signal battle_requested
 signal shop_requested
+## The room list's Create: host a room.
+signal room_create(room_name: String, password: String, teams: bool, beginner: bool)
+## The room list's Enter, a row's double click, Quick Join or Quick Go: join a host.
+signal room_join(address: String, password: String)
+## Game room controls.
+signal room_start
+signal room_map(step: int)
+signal room_slot(slot: int)
+signal room_chat(line: String)
+signal room_exit
 
 const BGM_MENU := 3 ## "Good Luck (Ver2)", from login through the rooms (play_sound_bgm_lua(3))
 ## Where the name, body and options are kept between runs.
@@ -46,13 +61,29 @@ var _cursor: Array[Texture2D] = []
 var _cursor_time := -1.0
 var _turntable: OriginalUI
 var _turn_time := 0.0
-var _console_lines: Array[String] = []
+## Console lines as [text, colour]: the main menu's, and the game room's.
+var _console_lines: Array = []
+var _room_lines: Array = []
 var _console_scroll := 0
 var _console_view: Node2D
 var _bgm_test := BGM_MENU
 var _texts := {}
 var _drag: OriginalUI
 var _drag_bar: Callable
+## The rooms on the local network, heard while the room list is open.
+var lan: LanRooms
+## page_custom_game: PushtypeCount (0 all, 1 single, 2 team) and PushStatusCount (0 all,
+## 1 waiting, 3 playing; 2 is skipped as the original did), the shown page of rows and the
+## chosen room.
+var _type_filter := 0
+var _status_filter := 0
+var _list_page := 0
+var _list_selected := ""
+var _list_click := ["", -1.0]
+## What the game room shows (game.gd's _room_view).
+var room_view := {}
+## The number the room list gave the room being joined (1 for a typed address).
+var joined_number := 1
 
 func _ready() -> void:
 	layer = 30
@@ -72,6 +103,11 @@ func _ready() -> void:
 	for frame in CURSOR_FRAMES:
 		_cursor.append(OriginalUI.texture("ui/widget/test/%s.png" % frame))
 	_load_profile()
+	lan = LanRooms.new()
+	add_child(lan)
+	lan.changed.connect(func() -> void:
+		if page == "room_list":
+			_fill_rooms())
 	if get_viewport():
 		get_viewport().size_changed.connect(_fit)
 	_fit()
@@ -124,6 +160,8 @@ func set_shown(on: bool) -> void:
 # --- Pages ------------------------------------------------------------------------------
 
 func _clear() -> void:
+	if page == "room_list" and lan:
+		lan.stop_listening()
 	for c in page_root.get_children():
 		c.queue_free()
 	for c in popup_root.get_children():
@@ -277,7 +315,9 @@ func show_main_menu(notice := "") -> void:
 		"option_button": "text_105", "exit_button": "text_102"}
 	for k in tips:
 		stack.w(k).tooltip = text(tips[k])
-	stack.w("battle_button").clicked.connect(func() -> void: battle_requested.emit())
+	stack.w("battle_button").clicked.connect(func() -> void:
+		battle_requested.emit()
+		show_room_list())
 	stack.w("tutorial_button").clicked.connect(func() -> void: practice_requested.emit())
 	stack.w("shop_button").clicked.connect(func() -> void: shop_requested.emit())
 	stack.w("channel_button").clicked.connect(_channel_popup)
@@ -286,24 +326,10 @@ func show_main_menu(notice := "") -> void:
 	var chat := _add("res_dlg_main_menu_chatting")
 	chat.w("edit_box").text_set(channel)
 	_console_view = Node2D.new()
-	_console_view.draw.connect(_draw_console.bind(chat.w("console")))
+	_console_view.draw.connect(_draw_console.bind(chat.w("console"), _console_lines))
 	chat.w("console").add_child(_console_view)
-	var tabs := chat.w("chat_style")
-	var normal := tabs.w("normal_button")
-	var whisper := tabs.w("whisper_button")
-	var clan := tabs.w("clan_button")
-	normal.tooltip = text("text_108")
-	whisper.tooltip = text("text_109")
-	clan.tooltip = text("text_123")
 	var edit := chat.w("input_edit")
-	for tab in [normal, whisper, clan]:
-		tab.clicked.connect(func() -> void:
-			for other in [normal, whisper, clan]:
-				other.set_checked(other == tab)
-			# The whisper tab starts the line with the whisper sign.
-			edit.editor.text = "@" if tab == whisper else ""
-			edit.focus_set())
-	normal.set_checked(true)
+	_chat_tabs(chat.w("chat_style"), edit)
 	edit.submitted.connect(func(t: String) -> void:
 		if t.strip_edges() != "":
 			console_add("[%s] %s" % [player_name, t.strip_edges()])
@@ -330,30 +356,60 @@ func show_main_menu(notice := "") -> void:
 	if notice != "":
 		message(notice)
 
-func console_add(line: String) -> void:
-	_console_lines.append(line)
+## The normal, whisper and clan tabs over a chat box. Only normal chat is carried; the
+## whisper tab starts the line with the whisper sign as the original did.
+func _chat_tabs(tabs: OriginalUI, edit: OriginalUI) -> void:
+	var normal := tabs.w("normal_button")
+	var whisper := tabs.w("whisper_button")
+	var clan := tabs.w("clan_button")
+	normal.tooltip = text("text_108")
+	whisper.tooltip = text("text_109")
+	clan.tooltip = text("text_123")
+	for tab in [normal, whisper, clan]:
+		tab.clicked.connect(func() -> void:
+			for other in [normal, whisper, clan]:
+				other.set_checked(other == tab)
+			edit.editor.text = "@" if tab == whisper else ""
+			edit.focus_set())
+	normal.set_checked(true)
+
+func console_add(line: String, color := Color.WHITE) -> void:
+	_console_lines.append([line, color])
 	_console_scroll = 0
-	if _console_view:
+	if _console_view and page == "main":
 		_console_view.queue_redraw()
+
+## The game room's console: chat, the start countdown and System notices.
+func room_console_add(line: String, color := Color.WHITE) -> void:
+	_room_lines.append([line, color])
+	_console_scroll = 0
+	if _console_view and page == "room":
+		_console_view.queue_redraw()
+
+## A new room starts with an empty console.
+func clear_room_console() -> void:
+	_room_lines.clear()
 
 func _scroll_console(step: int) -> void:
-	_console_scroll = clampi(_console_scroll + step, 0, maxi(0, _console_lines.size() - 1))
+	var lines := _room_lines if page == "room" else _console_lines
+	_console_scroll = clampi(_console_scroll + step, 0, maxi(0, lines.size() - 1))
 	if _console_view:
 		_console_view.queue_redraw()
 
-## WINDOW_CONSOLE2: the newest line at the bottom, white, scrolled back by the arrows.
-func _draw_console(console: OriginalUI) -> void:
+## WINDOW_CONSOLE2: the newest line at the bottom, each in its colour, scrolled back by the
+## arrows.
+func _draw_console(console: OriginalUI, lines: Array) -> void:
 	var f: Array = OriginalUI.font_for(0)
 	var font: Font = f[0]
 	var size: int = f[1]
 	var line_h := font.get_height(size) + 2.0
 	var y := console.wsize.y - 4.0
-	var last := _console_lines.size() - 1 - _console_scroll
+	var last := lines.size() - 1 - _console_scroll
 	for i in range(last, -1, -1):
 		if y - line_h < 0.0:
 			break
-		_console_view.draw_string(font, Vector2(4, y - font.get_descent(size)), _console_lines[i],
-			HORIZONTAL_ALIGNMENT_LEFT, console.wsize.x - 8.0, size, Color.WHITE)
+		_console_view.draw_string(font, Vector2(4, y - font.get_descent(size)), str(lines[i][0]),
+			HORIZONTAL_ALIGNMENT_LEFT, console.wsize.x - 8.0, size, lines[i][1])
 		y -= line_h
 
 ## on_push_channel_button: the channel name box, pre-filled "raycrash-", with OK and Cancel.
@@ -437,6 +493,396 @@ func _toggle(s: OriginalUI, prefix: String, on: bool, apply: Callable) -> void:
 		place.call(false)
 		apply.call(false))
 
+# --- Room list (page_custom_game) -----------------------------------------------------------
+
+const ROWS_PER_PAGE := 12 ## availList: 360 pixels of 28-pixel rows
+const DOUBLE_CLICK := 0.4
+## Text colours the room pages set (set_text_color, set_console2_text_color).
+const DARK_TEXT := Color8(43, 43, 43)
+const MY_NAME := Color8(255, 230, 63)
+const NOTICE := Color8(40, 255, 126)
+const ALERT := Color8(255, 154, 0)
+
+## The room list: the rooms heard on the network in rows of twelve, the type and status
+## filters, Quick Go (room number, or a room name or host address, and a password), Create,
+## Enter, Quick Join, Refresh and back to the channel.
+func show_room_list(notice := "") -> void:
+	_clear()
+	set_shown(true)
+	page = "room_list"
+	if sound and not sound.is_playing_bgm():
+		sound.play_bgm(BGM_MENU)
+	var bg := _add("res_dlg_custom_game_background")
+	_add("res_dlg_custom_game_availble_list", bg)
+	var topic := bg.w("battle_room_topic")
+	topic.w("type_button").tooltip = text("text_115")
+	topic.w("status_button").tooltip = text("text_116")
+	topic.w("type_button").clicked.connect(func() -> void:
+		_type_filter = (_type_filter + 1) % 3
+		topic.w("type_button_img").texture_switch(_type_filter + 1)
+		_list_page = 0
+		_fill_rooms())
+	topic.w("status_button").clicked.connect(func() -> void:
+		_status_filter = 0 if _status_filter >= 3 else (3 if _status_filter == 1 else 1)
+		_list_page = 0
+		_fill_rooms())
+	topic.w("type_button_img").texture_switch(_type_filter + 1)
+	var tips := {"refresh_button": "text_110", "create_game_button": "text_111", "quick_join_button": "text_112",
+		"enter_button": "text_113", "create_game_exit_button": "text_114"}
+	for k in tips:
+		bg.w(k).tooltip = text(tips[k])
+	bg.w("create_game_exit_button").clicked.connect(func() -> void: show_main_menu())
+	bg.w("create_game_button").clicked.connect(_create_room_popup)
+	bg.w("enter_button").clicked.connect(func() -> void:
+		var room := _listed_room(func(r: Dictionary) -> bool: return str(r["id"]) == _list_selected)
+		if room.is_empty():
+			message(system_text("Please_select_room"))
+		else:
+			_join_listed(room))
+	bg.w("quick_join_button").clicked.connect(func() -> void:
+		# request_quick_join: a waiting room with room for one more and no password.
+		var room := _listed_room(func(r: Dictionary) -> bool:
+			return not bool(r.get("playing", false)) and not bool(r.get("locked", false)) and int(r.get("players", 0)) < Room.SIZE)
+		if room.is_empty():
+			message(text("text_48"))
+		else:
+			_join_listed(room))
+	bg.w("refresh_button").clicked.connect(func() -> void:
+		_type_filter = 0
+		_status_filter = 0
+		_list_page = 0
+		topic.w("type_button_img").texture_switch(1)
+		lan.clear())
+	bg.w("back_button").clicked.connect(func() -> void:
+		_list_page -= 1
+		_fill_rooms())
+	bg.w("next_button").clicked.connect(func() -> void:
+		_list_page += 1
+		_fill_rooms())
+	var number_edit := bg.w("battle_room_quick_go_edit_room_number")
+	var name_edit := bg.w("battle_room_quick_go_edit_box")
+	var pass_edit := bg.w("battle_room_quick_go_edit_box_pass")
+	number_edit.editor.max_length = 3
+	name_edit.editor.max_length = 34
+	pass_edit.editor.max_length = 15
+	pass_edit.editor.secret = true
+	name_edit.editor.focus_next = name_edit.editor.get_path_to(pass_edit.editor)
+	pass_edit.editor.focus_next = pass_edit.editor.get_path_to(name_edit.editor)
+	for e in [number_edit, name_edit, pass_edit]:
+		e.submitted.connect(func(_t: String) -> void: _quick_go(number_edit, name_edit, pass_edit))
+	bg.w("battle_room_quick_go").w("go_button").clicked.connect(func() -> void: _quick_go(number_edit, name_edit, pass_edit))
+	_autofocus(name_edit)
+	if not lan.listen() and notice == "":
+		notice = "Another copy on this computer is listening for rooms. Type a host's address in Quick Go."
+	_fill_rooms()
+	if notice != "":
+		message(notice)
+
+func _list_rows() -> OriginalUI:
+	var bg := page_root.get_node_or_null("res_dlg_custom_game_background") as OriginalUI
+	if bg == null:
+		return null
+	return bg.w("res_dlg_custom_game_availble_list").w("availList")
+
+## The rooms the filters let through, in room number order.
+func _filtered_rooms() -> Array:
+	var out := []
+	for r: Dictionary in lan.rooms():
+		var teams := bool(r.get("teams", false))
+		var playing := bool(r.get("playing", false))
+		if (_type_filter == 1 and teams) or (_type_filter == 2 and not teams):
+			continue
+		if (_status_filter == 1 and playing) or (_status_filter == 3 and not playing):
+			continue
+		out.append(r)
+	return out
+
+func _listed_room(test: Callable) -> Dictionary:
+	for r: Dictionary in _filtered_rooms():
+		if test.call(r):
+			return r
+	return {}
+
+## RoomListHandler: one ResCustomGameListBoxItem per room on this page.
+func _fill_rooms() -> void:
+	var rows := _list_rows()
+	if rows == null:
+		return
+	for c in rows.get_children():
+		if c == _hover:
+			_hover = null
+		rows.remove_child(c)
+		c.queue_free()
+	var rooms := _filtered_rooms()
+	var pages := maxi(1, ceili(rooms.size() / float(ROWS_PER_PAGE)))
+	_list_page = clampi(_list_page, 0, pages - 1)
+	var bg := page_root.get_node("res_dlg_custom_game_background") as OriginalUI
+	bg.w("back_button").visible = _list_page > 0
+	bg.w("next_button").visible = _list_page < pages - 1
+	var first := _list_page * ROWS_PER_PAGE
+	for i in range(first, mini(rooms.size(), first + ROWS_PER_PAGE)):
+		var room: Dictionary = rooms[i]
+		var row := OriginalUI.create("ResCustomGameListBoxItem")
+		row.position = Vector2(0, (i - first) * 28)
+		row.w("room_number").text_set(str(room["number"]))
+		row.w("room_name").text_set(str(room.get("name", "")))
+		row.w("icon_lock").visible = bool(room.get("locked", false))
+		row.w("icon_beginner").visible = bool(room.get("beginner", false))
+		row.w("game_type").text_set(text("text_33" if bool(room.get("teams", false)) else "text_32"))
+		var players := int(room.get("players", 0))
+		var status := text("text_23")
+		if bool(room.get("playing", false)):
+			status = text("text_24")
+		elif players >= Room.SIZE:
+			status = "FULL"
+		elif bool(room.get("beginner", false)):
+			status = text("text_154")
+		row.w("status").text_set(status)
+		row.w("max_player").text_set("%d/%d" % [players, Room.SIZE])
+		row.set_checked(str(room["id"]) == _list_selected)
+		row.clicked.connect(_room_row_clicked.bind(row, room))
+		rows.add_child(row)
+
+## A click chooses the room; a second click on it soon after enters (EVENT_LISTBOX_ITEM_DBLCLICK).
+func _room_row_clicked(row: OriginalUI, room: Dictionary) -> void:
+	var id := str(room["id"])
+	var now := Time.get_ticks_msec() / 1000.0
+	if _list_click[0] == id and now - float(_list_click[1]) < DOUBLE_CLICK:
+		_list_click = ["", -1.0]
+		_join_listed(room)
+		return
+	_list_click = [id, now]
+	_list_selected = id
+	for r in row.get_parent().get_children():
+		(r as OriginalUI).set_checked(r == row)
+
+## OnPushJoinGameButton: a locked room asks for its password first.
+func _join_listed(room: Dictionary, password := "") -> void:
+	if int(room.get("players", 0)) >= Room.SIZE:
+		message(system_text("Room_is_full"))
+		return
+	var address := str(room["address"])
+	joined_number = int(room["number"])
+	if bool(room.get("locked", false)) and password == "":
+		_password_popup(func(pw: String) -> void: room_join.emit(address, pw))
+	else:
+		room_join.emit(address, password)
+
+## Room_name_Type_enter: a room number goes first, then a room name; a name that is no
+## listed room but reads as an address joins that host directly.
+func _quick_go(number_edit: OriginalUI, name_edit: OriginalUI, pass_edit: OriginalUI) -> void:
+	var number := number_edit.text_get().strip_edges()
+	var room_name := name_edit.text_get().strip_edges()
+	var password := pass_edit.text_get()
+	if number == "" and room_name == "":
+		return
+	var room := {}
+	if number != "":
+		room = _find_room(func(r: Dictionary) -> bool: return str(r["number"]) == number)
+	else:
+		room = _find_room(func(r: Dictionary) -> bool: return str(r.get("name", "")) == room_name)
+		if room.is_empty() and _is_address(room_name):
+			joined_number = 1
+			room_join.emit(room_name, password)
+			return
+	if room.is_empty():
+		message(system_text("room_not_exist"))
+	else:
+		_join_listed(room, password)
+
+func _find_room(test: Callable) -> Dictionary:
+	for r: Dictionary in lan.rooms():
+		if test.call(r):
+			return r
+	return {}
+
+static func _is_address(s: String) -> bool:
+	return s.is_valid_ip_address() or s == "localhost" or (s.contains(".") and not s.contains(" "))
+
+## on_page_create_game: the room name and password, the game type (single or team battle)
+## and the beginner room switch, which starts on for a pilot of grade 5 or below.
+func _create_room_popup() -> void:
+	var pop := _add("res_dlg_custom_game_create", popup_root)
+	var dlg := pop.w("dlg")
+	var name_edit := dlg.w("input_name_edit")
+	var pass_edit := dlg.w("input_pass_edit")
+	name_edit.editor.max_length = 20
+	pass_edit.editor.max_length = 15
+	for e in [name_edit, pass_edit]:
+		e.editor.add_theme_color_override("font_color", Color8(230, 230, 230))
+	name_edit.editor.focus_next = name_edit.editor.get_path_to(pass_edit.editor)
+	pass_edit.editor.focus_next = pass_edit.editor.get_path_to(name_edit.editor)
+	name_edit.focus_set()
+	var choice := {"teams": false, "beginner": true}
+	var type_text := dlg.w("game_type_text")
+	var event_text := dlg.w("event_type_text")
+	type_text.text_set(text("text_32"), DARK_TEXT)
+	event_text.text_set("ON", DARK_TEXT)
+	dlg.w("arrow_button").clicked.connect(func() -> void:
+		_choice_list(dlg, "ResTypeSelectButton", ["single_battle_button", "team_battle_button"],
+			[text("text_32"), text("text_33")], type_text, dlg.w("arrow_button"),
+			func(i: int) -> void: choice["teams"] = i == 1))
+	dlg.w("arrow_button_3").clicked.connect(func() -> void:
+		_choice_list(dlg, "ResEventSelectButton", ["event_battle_button", "no_event_battle_button"],
+			["ON", "OFF"], event_text, dlg.w("arrow_button_3"),
+			func(i: int) -> void: choice["beginner"] = i == 0))
+	var create := func() -> void:
+		var room_name := name_edit.text_get()
+		# onPushCreateGameButton: no empty name and no space at either end.
+		if room_name == "" or room_name.begins_with(" ") or room_name.ends_with(" "):
+			message(text("text_10"))
+			return
+		if room_name.length() > 20:
+			message(text("text_11"))
+			return
+		pop.queue_free()
+		room_create.emit(room_name, pass_edit.text_get(), choice["teams"], choice["beginner"])
+	name_edit.submitted.connect(func(_t: String) -> void: create.call())
+	pass_edit.submitted.connect(func(_t: String) -> void: create.call())
+	dlg.w("create_button").clicked.connect(create)
+	dlg.w("cancel_button").clicked.connect(func() -> void: pop.queue_free())
+
+## on_game_type_push_button and On_Event_type_push_button: the two choices drop down over
+## the text and its arrow until one is picked.
+func _choice_list(dlg: OriginalUI, table: String, keys: Array, labels: Array, shown: OriginalUI,
+		arrow: OriginalUI, picked: Callable) -> void:
+	if dlg.get_node_or_null(table):
+		return
+	var list := OriginalUI.create(table)
+	dlg.add_child(list)
+	shown.visible = false
+	arrow.visible = false
+	for i in keys.size():
+		var b := list.w(keys[i])
+		b.text_set(labels[i], DARK_TEXT)
+		b.clicked.connect(func() -> void:
+			picked.call(i)
+			shown.text_set(labels[i])
+			shown.visible = true
+			arrow.visible = true
+			dlg.remove_child(list)
+			list.queue_free())
+
+## The password box a locked room asks for (res_dlg_custom_game_information).
+func _password_popup(done: Callable) -> void:
+	var pop := _add("res_dlg_custom_game_information", popup_root)
+	var dlg := pop.w("dlg")
+	var edit := dlg.w("input_password")
+	edit.editor.max_length = 15
+	edit.focus_set()
+	var ok := func() -> void:
+		pop.queue_free()
+		done.call(edit.text_get())
+	edit.submitted.connect(func(_t: String) -> void: ok.call())
+	dlg.w("ok_button").clicked.connect(ok)
+	dlg.w("cancel_button").clicked.connect(func() -> void: pop.queue_free())
+
+# --- Game room (page_game_room) -------------------------------------------------------------
+
+## The game room: the room's information bar, the map banner with the master's arrows, the
+## twelve slots (red 1-6 on the left, blue 7-12 on the right), the chat, START for the room
+## master and Exit. view is what the game hands over (game.gd _room_view); update_game_room
+## refreshes it in place.
+func show_game_room(view: Dictionary) -> void:
+	_clear()
+	set_shown(true)
+	page = "room"
+	if sound and not sound.is_playing_bgm():
+		sound.play_bgm(BGM_MENU)
+	var bg := _add("res_dlg_game_room_background")
+	var option := _add("res_dlg_game_room_game_option", bg)
+	var chat := _add("res_dlg_game_room_chatting_dialog", bg)
+	var users := _add("res_dlg_game_room_userlist", bg)
+	bg.w("grade_up_img").visible = false
+	# There is no watch mode: the arrows that switched to it go, and the label stays on fight.
+	bg.w("left_arrow_button").visible = false
+	bg.w("right_arrow_button").visible = false
+	bg.w("start_button").tooltip = text("text_117")
+	bg.w("exit_button").tooltip = text("text_122")
+	bg.w("start_button").clicked.connect(func() -> void: room_start.emit())
+	bg.w("exit_button").clicked.connect(func() -> void: room_exit.emit())
+	option.w("back_button").clicked.connect(func() -> void: room_map.emit(-1))
+	option.w("next_button").clicked.connect(func() -> void: room_map.emit(1))
+	for s in Room.SIZE:
+		# ChangeTeamSlot: a click on a slot asks to move there.
+		_slot_window(users, s).clicked.connect(func() -> void: room_slot.emit(s))
+	_console_view = Node2D.new()
+	_console_view.draw.connect(_draw_console.bind(chat.w("console"), _room_lines))
+	chat.w("console").add_child(_console_view)
+	var edit := chat.w("input_chat_edit")
+	edit.editor.max_length = 60
+	var tabs := chat.w("chat_style")
+	_chat_tabs(tabs, edit)
+	# The waiting list, the master's room options and the beginner switch needed the server.
+	for k in ["wait_list_button", "option_button", "beginner_off_button"]:
+		tabs.w(k).visible = false
+	edit.submitted.connect(func(t: String) -> void:
+		if t.strip_edges() != "":
+			room_chat.emit(t.strip_edges())
+		edit.editor.text = "")
+	chat.w("scroll_up_button").clicked.connect(func() -> void: _scroll_console(1))
+	chat.w("scroll_down_button").clicked.connect(func() -> void: _scroll_console(-1))
+	_autofocus(edit)
+	update_game_room(view)
+
+## The box a page starts typing in, as the original set; not on a phone, where focus brings
+## up the keyboard over the page.
+static func _autofocus(edit: OriginalUI) -> void:
+	if not (DisplayServer.is_touchscreen_available() and not OS.has_feature("pc")):
+		edit.focus_set()
+
+static func _slot_window(users: OriginalUI, slot: int) -> OriginalUI:
+	return users.w("red_team" if slot < Room.HALF else "blue_team").w("team_seed_%d" % (slot + 1))
+
+## SetRoomNumberAndName, handle_map_select, OnManagerChange and UpdateGameRoomUserEnterInfo:
+## view has number, name, teams, playing, beginner, map (0-4), master (you run the room)
+## and slots: slot -> {name, face, master, me, playing}.
+func update_game_room(view: Dictionary) -> void:
+	room_view = view
+	if page != "room":
+		return
+	var bg := page_root.get_node_or_null("res_dlg_game_room_background") as OriginalUI
+	if bg == null:
+		return
+	var teams := bool(view.get("teams", false))
+	var master := bool(view.get("master", false))
+	bg.w("room_number").text_set("NO %d " % int(view.get("number", 1)))
+	bg.w("room_name").text_set(str(view.get("name", "")))
+	bg.w("game_type").text_set(text("text_33" if teams else "text_32"))
+	bg.w("status").text_set(text("text_24" if bool(view.get("playing", false)) else "text_23"))
+	bg.w("is_beginner").text_set(text("text_154") if bool(view.get("beginner", false)) else "")
+	# Team battle shows the red and blue marks and each side's average grade and points.
+	for k in ["red_team_mark", "blue_team_mark", "average_left_img", "average_right_img"]:
+		bg.w(k).visible = teams
+	bg.w("average_left_img").pos_set(48, 142)
+	bg.w("average_right_img").pos_set(520, 142)
+	bg.w("start_button").visible = master
+	var option := bg.w("res_dlg_game_room_game_option")
+	option.w("back_button").visible = master
+	option.w("next_button").visible = master
+	option.w("game_map").texture_switch(int(view.get("map", 0)) + 1)
+	var users := bg.w("res_dlg_game_room_userlist")
+	users.w("vs_mark").visible = teams
+	var slots: Dictionary = view.get("slots", {})
+	for s in Room.SIZE:
+		var slot_win := _slot_window(users, s)
+		var info := slot_win.w("charactor_info_option")
+		var who: Dictionary = slots.get(s, {})
+		slot_win.w("close_img").texture_switch(1)
+		slot_win.w("playing_img").texture_switch(2 if bool(who.get("playing", false)) else 1)
+		info.visible = not who.is_empty()
+		if who.is_empty():
+			continue
+		info.w("name").text_set(str(who.get("name", "")), MY_NAME if bool(who.get("me", false)) else Color.WHITE)
+		info.w("pilot_list").texture_switch(int(who.get("face", 1)))
+		info.w("grade").texture_switch(1)
+		info.w("manager_mark").visible = bool(who.get("master", false))
+		info.w("clan_name").text_set("")
+		for k in ["zzang_mark", "observer_img", "guild_mark"]:
+			info.w(k).visible = false
+		info.w("start_loading").texture_switch(1)
+		info.w("ping_img").texture_switch(1)
+
 ## Android's back button: close a popup, else step back a page; from login, quit.
 func go_back() -> void:
 	for i in range(popup_root.get_child_count() - 1, -1, -1):
@@ -450,6 +896,10 @@ func go_back() -> void:
 			show_main_menu()
 		"main":
 			show_character()
+		"room_list":
+			show_main_menu()
+		"room":
+			room_exit.emit()
 		"character":
 			_character_exit()
 		"login":
@@ -528,7 +978,7 @@ func _input(event: InputEvent) -> void:
 	elif event is InputEventMouseButton:
 		var mb := event as InputEventMouseButton
 		if mb.button_index != MOUSE_BUTTON_LEFT:
-			if mb.pressed and page == "main" and (mb.button_index == MOUSE_BUTTON_WHEEL_UP or mb.button_index == MOUSE_BUTTON_WHEEL_DOWN):
+			if mb.pressed and page in ["main", "room"] and (mb.button_index == MOUSE_BUTTON_WHEEL_UP or mb.button_index == MOUSE_BUTTON_WHEEL_DOWN):
 				_scroll_console(1 if mb.button_index == MOUSE_BUTTON_WHEEL_UP else -1)
 			return
 		var p := _to_page(mb.position)

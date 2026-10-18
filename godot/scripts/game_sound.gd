@@ -98,11 +98,14 @@ func _stream(sound: String) -> AudioStream:
 const BGM_BATTLE_COUNT := 19 ## NetManager: play(rand() % 19) when a match starts
 const BGM_VICTORY := 19
 const BGM_DEFEAT := 23
+## The play list entry last started, -1 after stop_bgm.
+var current_bgm := -1
 
 ## BGM::play: stops what was playing and starts entry index. The two entries whose files
 ## the original could not find stay silent, as they did.
 func play_bgm(index: int) -> void:
 	_music.stop()
+	current_bgm = index
 	if not enabled or index < 0 or index >= _bgm.size() or _bgm[index] == null:
 		return
 	var path := ROOT + "bgm/" + str(_bgm[index])
@@ -131,3 +134,4 @@ func play_battle_bgm() -> void:
 
 func stop_bgm() -> void:
 	_music.stop()
+	current_bgm = -1

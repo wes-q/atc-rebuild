@@ -517,6 +517,31 @@ func _build_result() -> void:
 	box.add_child(_result_footer)
 	_result.visible = false
 
+## start_ready_go: READY over the screen, shrinking 15 pixels every 0.05 s until it is gone,
+## then after a pause GO, shrinking the same way about once a frame.
+func ready_go() -> void:
+	if not OriginalUI.available():
+		return
+	var ready_img := OriginalUI.create_child("res_dlg_game_fight_background", "ready")
+	var go_img := OriginalUI.create_child("res_dlg_game_fight_background", "go")
+	screen.add_child(ready_img)
+	screen.add_child(go_img)
+	go_img.visible = false
+	var shrink := func(win: OriginalUI, step: float, height: float, top: float) -> void:
+		var i := floorf(step)
+		win.visible = height - 15.0 * i >= 0.0
+		win.size_set(800.0 - 15.0 * i, height - 15.0 * i)
+		win.pos_set(7.5 * i, top + 7.5 * i)
+	var tw := create_tween()
+	tw.tween_method(func(k: float) -> void: shrink.call(ready_img, k, 120.0, 150.0), 0.0, 9.0, 0.45)
+	# The hidden READY's slide (ten steps of sleep(0.0001), about a frame each) and sleep(0.5).
+	tw.tween_interval(0.67)
+	tw.tween_callback(func() -> void: go_img.visible = true)
+	tw.tween_method(func(k: float) -> void: shrink.call(go_img, k, 249.0, 130.0), 0.0, 17.0, 0.28)
+	tw.tween_callback(func() -> void:
+		ready_img.queue_free()
+		go_img.queue_free())
+
 func show_result(title: String, lines: Array[String], footer: String) -> void:
 	_result_title.text = title
 	var color := Color(0.5, 0.9, 1.0)

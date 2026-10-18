@@ -5,15 +5,16 @@ extends Node3D
 ## its state (the move protocol), shots are broadcast as events, and the player who is hit
 ## decides the damage (weapon_mode_parameter: DAMAGE_DETERMINE_HITTEN_PLAYER for the SR-3).
 ##
-## Match rules follow the original free-for-all (GameRoom::is_game_end, mode 0): no respawns,
-## the match ends as soon as one mech is left, and the clock counts up. Starting the next round
-## automatically after the results is this recreation's own addition; the original returned
-## players to the room lobby.
+## Match rules follow the original (GameRoom::is_game_end): no respawns, the round ends as soon
+## as one mech or one side is left, and the clock counts up. A networked game is played from
+## the original game room (page_game_room.lua): the room master starts it with a five-second
+## countdown, and after the results everyone goes back to the room. Practice starts its next
+## round on its own.
 ##
-##   godot --path godot                     menu
+##   godot --path godot                     menus
 ##   godot --path godot -- practice         target dummy
-##   godot --path godot -- host             player 1, waits on port 7777
-##   godot --path godot -- join 127.0.0.1   player 2
+##   godot --path godot -- host             a room on port 7777
+##   godot --path godot -- join 127.0.0.1   into that room
 ## Add "map=<id>" (space, city, sky, gsession, escape) to pick the arena, "autopilot" for the
 ## scripted duel, "netlog" for position logs.
 
@@ -76,10 +77,30 @@ var spawn_points: Array[int] = [0, 1]
 ## Peer id -> slot, kept by the host and sent to everyone whenever it changes. Slots are
 ## handed out lowest first and decide the start point, name and colour scheme.
 var roster: Dictionary = {}
-## Host: start the first round on its own once this many players are in (0: wait for Enter).
+## Host: start the countdown on its own once this many players are in the room (0: wait for
+## START or Enter).
 var _auto_start := _arg_int("players=")
 ## The room's mode (byTeam): team battle, chosen by the host and sent with the roster.
 var team_mode := OS.get_cmdline_user_args().has("teams")
+## The room (page_game_room): its name, password (kept by the host, never sent), beginner flag
+## and number as the room list showed it. The map is map_choice, the game type team_mode.
+var room_name := ""
+var room_password := ""
+var room_beginner := false
+var room_number := 1
+## Peer id -> player name and body, from each player's hello, sent with the roster.
+var names: Dictionary = {}
+var bodies: Dictionary = {}
+## The password a joining player sends with their hello.
+var _join_password := ""
+## In the game room between battles (the front end shows it), and whether a battle is on.
+var _in_room := false
+var _match_on := false
+## Players who came in during a battle and wait in the room for the next one.
+var _sitting_out: Dictionary = {}
+## Host: the start countdown's next number (5 to 1), -1 when not counting, and its clock.
+var _countdown := -1
+var _countdown_timer := 0.0
 ## Mechs in the round when it began, for the free-for-all points rule.
 var round_starters := 0
 ## After your mech is gone the camera follows another player (set_next_camera).
@@ -175,9 +196,7 @@ func _ready() -> void:
 		touch = TouchControls.new()
 		touch.visible = false
 		add_child(touch)
-		touch.menu_pressed.connect(func() -> void:
-			_reset_world()
-			_show_menu(""))
+		touch.menu_pressed.connect(_leave_match)
 		touch.start_pressed.connect(_try_start)
 		touch.team_pressed.connect(_ask_change_team)
 		hud.touch_help = true
@@ -189,13 +208,23 @@ func _ready() -> void:
 	front.visible = false
 	add_child(front)
 	front._load_profile()
+	# Test option "name=<player>": play under another name without saving it.
+	if _arg_str("name=") != "":
+		front.player_name = _arg_str("name=")
 	if _arg_str("body=") == "":
 		body_choice = front.body
 	front.practice_requested.connect(func() -> void:
 		body_choice = front.body
 		start_practice())
-	front.battle_requested.connect(func() -> void: _show_classic(""))
 	front.shop_requested.connect(func() -> void: _show_classic(""))
+	front.room_create.connect(func(n: String, pw: String, teams: bool, beginner: bool) -> void:
+		start_host(n, pw, teams, beginner))
+	front.room_join.connect(func(address: String, pw: String) -> void: start_join(address, pw))
+	front.room_start.connect(_try_start)
+	front.room_map.connect(_change_map)
+	front.room_slot.connect(_ask_slot)
+	front.room_chat.connect(_send_chat)
+	front.room_exit.connect(func() -> void: _back_to_rooms(""))
 	add_child(hud)
 	multiplayer.peer_connected.connect(_on_peer_connected)
 	multiplayer.peer_disconnected.connect(_on_peer_disconnected)
@@ -205,10 +234,12 @@ func _ready() -> void:
 
 	var args := OS.get_cmdline_user_args()
 	if args.has("host"):
-		start_host()
+		# Test options "room=<name>": the room's name (otherwise "<player>'s room");
+		# "password=<pw>": a locked room, or the password to join one with.
+		start_host(_arg_str("room="), _arg_str("password="))
 	elif args.has("join"):
 		var i := args.find("join")
-		start_join(args[i + 1] if i + 1 < args.size() else "127.0.0.1")
+		start_join(args[i + 1] if i + 1 < args.size() else "127.0.0.1", _arg_str("password="))
 	elif args.has("practice") or _autopilot:
 		start_practice()
 	elif args.has("classic"):
@@ -289,6 +320,7 @@ func _show_classic(message: String) -> void:
 		menu.select_mode(team_mode)
 		menu.back_chosen.connect(func() -> void:
 			body_choice = menu.body_id
+			loadout_choice = menu.loadout
 			front.body = body_choice
 			front.save_profile()
 			_show_menu(""))
@@ -306,7 +338,8 @@ func _hide_menu() -> void:
 	if map_node:
 		for c in map_node.get_children():
 			(c as Node3D).visible = true
-	if menu:
+	# The classic menu's choices count when it is the one starting the game.
+	if menu and menu.visible:
 		menu.visible = false
 		map_choice = menu.map_id
 		body_choice = menu.body_id
@@ -373,36 +406,59 @@ func start_practice() -> void:
 	_status = "Practice on %s. %s: menu" % [map.title, _key("Esc", "MENU")]
 	_begin_round(1, map.id, _pick_spawns())
 
-func start_host() -> void:
+## Creates a room and becomes its master (request_create_room). Teams and beginner default to
+## the classic menu's or the command line's choice.
+func start_host(new_name := "", password := "", teams: Variant = null, beginner := false) -> void:
+	_hide_menu()
 	_reset_world()
 	var peer := ENetMultiplayerPeer.new()
 	var err := peer.create_server(PORT, MAX_PLAYERS - 1)
 	if err != OK:
-		_show_menu("Could not host on port %d (error %d). Is another copy already hosting?" % [PORT, err])
+		_back_to_rooms("Could not host on port %d (error %d). Is another copy already hosting?" % [PORT, err])
 		return
 	multiplayer.multiplayer_peer = peer
+	if teams != null:
+		team_mode = teams
+	room_name = new_name if new_name != "" else "%s's room" % _player_name()
+	room_password = password
+	room_beginner = beginner
+	room_number = 1
 	_set_mode("host")
-	_hide_menu()
-	_use_map(map_choice)
 	local_id = multiplayer.get_unique_id()
 	roster = {local_id: 0}
+	names = {local_id: _player_name()}
+	bodies = {local_id: body_choice}
 	_spawn(local_id, 0, true, body_choice, loadout_choice)
+	front.clear_room_console()
+	_to_room()
+	_room_notice_local("%s %s" % [names[local_id], front.text("text_29")])
+	# Where others can reach this room when the room list does not find it.
+	front.room_console_add("System : Hosting on %s port %d." % [", ".join(_lan_addresses()), PORT], FrontEnd.NOTICE)
 	_host_status()
 
-func start_join(address: String) -> void:
+## Joins a room by its host's address (request_game_room_enter). The host answers the hello
+## with the roster, or with why not.
+func start_join(address: String, password := "") -> void:
+	_hide_menu()
 	_reset_world()
 	var peer := ENetMultiplayerPeer.new()
 	var err := peer.create_client(address, PORT)
 	if err != OK:
-		_show_menu("Could not start connecting to %s (error %d)." % [address, err])
+		_back_to_rooms("Could not start connecting to %s (error %d)." % [address, err])
 		return
 	multiplayer.multiplayer_peer = peer
+	_join_password = password
+	room_number = front.joined_number
 	_set_mode("join")
-	_hide_menu()
 	_status = "Connecting to %s port %d..." % [address, PORT]
+	if front.page == "room_list":
+		front.set_shown(true)
+		front.message("%s (%s)" % [front.text("text_25"), address])
 
 func _reset_world() -> void:
-	sound.stop_bgm()
+	# The menus' music carries on through the room list and the rooms.
+	if _match_on or mode == "practice":
+		sound.stop_bgm()
 	for id in mechs.keys():
 		_remove_mech(id)
 	_clear_bullets()
@@ -419,6 +475,14 @@ func _reset_world() -> void:
 	_end_timer = -1.0
 	_next_round_timer = -1.0
 	hud.hide_result()
+	names.clear()
+	bodies.clear()
+	_sitting_out.clear()
+	_in_room = false
+	_match_on = false
+	_countdown = -1
+	room_password = ""
+	front.lan.stop()
 
 func _clear_bullets() -> void:
 	for b in bullets:
@@ -448,15 +512,36 @@ func _notification(what: int) -> void:
 		elif menu and menu.visible:
 			_show_menu("")
 		elif mode != "":
-			_reset_world()
-			_show_menu("")
+			_leave_match()
 		else:
 			get_tree().quit()
 
-func _unhandled_input(event: InputEvent) -> void:
-	if event.is_action_pressed("ui_cancel") and mode != "":
+## Esc or MENU in a battle: practice goes back to the main menu, a networked game leaves the
+## room for the room list.
+func _leave_match() -> void:
+	if _networked():
+		_back_to_rooms("")
+	else:
 		_reset_world()
 		_show_menu("")
+
+## Out of the room (ui_request_room_exit), or turned away: the room list, with any message.
+func _back_to_rooms(message: String) -> void:
+	if _netlog:
+		print("[room] back to the room list: ", message)
+	_reset_world()
+	_set_mode("")
+	_status = ""
+	if touch:
+		touch.visible = false
+	if not sound.is_playing_bgm():
+		sound.play_bgm(FrontEnd.BGM_MENU)
+	_menu_backdrop()
+	front.show_room_list(message)
+
+func _unhandled_input(event: InputEvent) -> void:
+	if event.is_action_pressed("ui_cancel") and mode != "" and not _in_room:
+		_leave_match()
 	# The host starts the match once everyone is in (the room master's start button).
 	if event is InputEventKey and event.pressed and not event.echo and (event as InputEventKey).keycode in [KEY_ENTER, KEY_KP_ENTER]:
 		_try_start()
@@ -467,17 +552,66 @@ func _unhandled_input(event: InputEvent) -> void:
 		if not sound.enabled:
 			sound.stop_bgm()
 
-## The host's start: Enter, or START on a touch screen.
+## The room master's START (or Enter): starts the countdown, or calls it off while it runs
+## (onPushGameStartButton). A game needs two players, and in team battle even sides.
 func _can_start_now() -> bool:
-	return mode == "host" and round_number == 0 and Room.can_start(roster.values(), team_mode)
+	return mode == "host" and _in_room and Room.can_start(roster.values(), team_mode)
 
 func _try_start() -> void:
-	if _can_start_now():
+	if mode != "host" or not _in_room:
+		return
+	if _countdown >= 0:
+		_cancel_countdown()
+	elif _can_start_now():
+		_countdown = 5
+		_countdown_timer = 0.0
+	elif roster.size() < 2:
+		front.message(front.text("text_12"))
+	else:
+		front.message(front.text("text_15"))
+
+func _cancel_countdown() -> void:
+	if _countdown < 0:
+		return
+	_countdown = -1
+	_net_countdown.rpc(0)
+	_on_countdown(0)
+
+## Host, every physics tick: one number a second, then the battle.
+func _step_countdown(dt: float) -> void:
+	if _countdown < 0:
+		return
+	if not Room.can_start(roster.values(), team_mode):
+		_cancel_countdown()
+		return
+	_countdown_timer -= dt
+	if _countdown_timer > 0.0:
+		return
+	if _countdown == 0:
+		_countdown = -1
 		_start_next_round()
+		return
+	_net_countdown.rpc(_countdown)
+	_on_countdown(_countdown)
+	_countdown -= 1
+	_countdown_timer = 1.0
+
+@rpc("authority", "call_remote", "reliable")
+func _net_countdown(n: int) -> void:
+	_on_countdown(n)
+
+## handle_start_game_ready: "5 seconds remaining" down to 1 with its sound, in the room's
+## console; 0 is the master calling it off (text_21).
+func _on_countdown(n: int) -> void:
+	if n <= 0:
+		front.room_console_add(front.text("text_21"), FrontEnd.ALERT)
+		return
+	sound.play("sound/ui/countdown %d-%02d" % [n, 6 - n])
+	front.room_console_add(front.text("text_%d" % (21 - n)), FrontEnd.NOTICE if n > 1 else FrontEnd.ALERT)
 
 ## T, or TEAM on a touch screen: move to the other side between rounds.
 func _can_change_team_now() -> bool:
-	return team_mode and _networked() and not round_active
+	return team_mode and _networked() and _in_room
 
 func _ask_change_team() -> void:
 	if not _can_change_team_now():
@@ -495,6 +629,11 @@ func _key(key_name: String, button: String) -> String:
 
 ## Everyone back to a start point at full health, tallies cleared, clock from zero.
 func _begin_round(number: int, map_id: String, spawns: Array[int]) -> void:
+	_hide_menu()
+	_in_room = false
+	_match_on = true
+	_countdown = -1
+	_sitting_out.clear()
 	_use_map(map_id)
 	spawn_points = spawns
 	round_number = number
@@ -529,8 +668,14 @@ func _begin_round(number: int, map_id: String, spawns: Array[int]) -> void:
 		var at := me.sim.pos + Original.vec2_from_deg(me.sim.facing) * _dummy_near
 		d.sim.reset_at(at, (me.sim.facing + 180) % 360)
 	hud.hide_result()
+	if _networked():
+		# OnRoomStartGameReadyResult, then start_ready_go once the battle is up.
+		front.room_console_add(front.text("text_22"), FrontEnd.ALERT)
+		hud.ready_go()
+		sound.play("sound/ui/ready go")
 	if mode == "host":
 		_host_status()
+		_advertise()
 
 @rpc("authority", "call_remote", "reliable")
 func _net_round_start(number: int, map_id: String, spawns: Array) -> void:
@@ -539,13 +684,13 @@ func _net_round_start(number: int, map_id: String, spawns: Array) -> void:
 		typed.append(int(i))
 	_begin_round(number, map_id, typed)
 
-## Host or practice: next round on the same arena, fresh start points.
+## Host or practice: next round on the room's arena, fresh start points.
 func _start_next_round() -> void:
 	var next := round_number + 1
 	var spawns := _pick_spawns()
-	_begin_round(next, map.id, spawns)
+	_begin_round(next, map_choice, spawns)
 	if mode == "host":
-		_net_round_start.rpc(next, map.id, spawns)
+		_net_round_start.rpc(next, map_choice, spawns)
 
 ## Host (or practice): ends the round once one mech or none is left standing.
 func _check_round_end() -> void:
@@ -583,6 +728,62 @@ func _send_result() -> void:
 	if mode == "host":
 		_host_status()
 
+## Host: the results have been up long enough. Practice plays on; a room goes back to the room.
+func _results_done() -> void:
+	if mode == "host":
+		_net_to_room.rpc()
+		_to_room()
+	else:
+		_start_next_round()
+
+@rpc("authority", "call_remote", "reliable")
+func _net_to_room() -> void:
+	_to_room()
+
+## The game room between battles: the arena's sky alone behind it, the mechs put away and
+## the menus' music (page_game_room, Game_end).
+func _to_room() -> void:
+	_in_room = true
+	_match_on = false
+	round_active = false
+	_end_timer = -1.0
+	_next_round_timer = -1.0
+	hud.hide_result()
+	_clear_bullets()
+	if touch:
+		touch.visible = false
+	for m: Mech in mechs.values():
+		m.view.visible = false
+	if map_node:
+		for c in map_node.get_children():
+			(c as Node3D).visible = c == sky
+		depth = 320.0
+		cam_from = Vector3(0, -depth, 0)
+		camera.position = Vector3(0, depth, 0)
+		camera.look_at(Vector3.ZERO, Vector3(0, 0, -1))
+		if sky:
+			BattleWorld.place_sky(sky, camera)
+	else:
+		_menu_backdrop()
+	if not sound.is_playing_bgm() or sound.current_bgm != FrontEnd.BGM_MENU:
+		sound.play_bgm(FrontEnd.BGM_MENU)
+	# The battle hid the page; it comes back as it was, chat and all.
+	if front.page == "room":
+		front.set_shown(true)
+		front.update_game_room(_room_view())
+	else:
+		front.show_game_room(_room_view())
+	if mode == "host":
+		_advertise()
+		_host_status()
+		_maybe_auto_start()
+
+## Test option players=N: the master starts the countdown once N are in and the sides are even.
+func _maybe_auto_start() -> void:
+	if _auto_start > 0 and mode == "host" and _in_room and _countdown < 0 and roster.size() >= _auto_start and Room.can_start(roster.values(), team_mode):
+		_countdown = 5
+		_countdown_timer = 0.0
+
 @rpc("authority", "call_remote", "reliable")
 func _net_round_result(winners: Array, tally: Dictionary) -> void:
 	_show_result(winners, tally)
@@ -600,6 +801,7 @@ func _show_result(winners: Array, tally: Dictionary) -> void:
 	# Victory music for the winner, defeat for everyone else (NetManager).
 	sound.play_bgm(GameSound.BGM_VICTORY if won else GameSound.BGM_DEFEAT)
 	var double := not team_mode and round_starters >= 3
+	var next := "back to the room" if _networked() else "next round"
 	var lines: Array[String] = []
 	for m: Mech in _mechs_in_slot_order():
 		var t: Array = tally.get(m.id, [0, 0])
@@ -607,26 +809,29 @@ func _show_result(winners: Array, tally: Dictionary) -> void:
 		s.damage = int(t[1])
 		lines.append("%-14s  kills %d   damage %4d   points %3d   rounds won %d" % [
 			_mech_label(m), int(t[0]), s.damage, s.points(double), int(wins.get(m.id, 0))])
-	hud.show_result(title, lines, "Round %d    time %s    next round in %d s" % [round_number, Hud.clock_text(round_time), int(RESULT_TIME)])
+	hud.show_result(title, lines, "Round %d    time %s    %s in %d s" % [round_number, Hud.clock_text(round_time), next, int(RESULT_TIME)])
 
 func _mechs_in_slot_order() -> Array:
 	var list := mechs.values()
 	list.sort_custom(func(a: Mech, b: Mech) -> bool: return a.slot < b.slot)
 	return list
 
-## Name shown over a mech and in the HUD (the original showed account names).
+## Name shown over a mech and in the HUD: the player's login name (the original showed
+## account names), as the room's roster carries it.
 func _mech_name(m: Mech) -> String:
 	if m.id == DUMMY_ID:
 		return "Target"
-	# Your login name for your own mech; other players' names come with the room (step 14).
-	if m.local and front and front.player_name != "":
-		return front.player_name
-	return "Player %d" % (m.slot + 1)
+	if m.local:
+		return _player_name()
+	return str(names.get(m.id, "Player %d" % (m.slot + 1)))
+
+func _player_name() -> String:
+	return front.player_name if front and front.player_name != "" else "Player"
 
 func _mech_label(m: Mech) -> String:
 	if m.id == DUMMY_ID:
 		return "Target"
-	var label := ("You, P%d" if m.id == local_id else "P%d") % (m.slot + 1)
+	var label := _mech_name(m) + (" (you)" if m.id == local_id else "")
 	match m.team:
 		Room.RED:
 			label += " red"
@@ -636,60 +841,101 @@ func _mech_label(m: Mech) -> String:
 
 # --- Network events ---------------------------------------------------------------------
 
-## Connected: the host's roster brings our slot and everyone else's mech.
+## Connected: say who we are; the host's roster brings our slot and everyone else's mech.
 func _on_connected_to_server() -> void:
 	local_id = multiplayer.get_unique_id()
-	_status = "Connected. Waiting for the host's player list."
+	_status = "Connected. Waiting for the room."
+	_net_hello.rpc_id(1, _player_name(), _join_password, body_choice)
 
 func _on_connection_failed() -> void:
-	_reset_world()
-	_show_menu("Could not connect. Check the host is running and the address is right.")
+	_back_to_rooms("Could not connect. Check the host is running and the address is right.")
 
+## The master's machine is the room, so the room closes with it (the original passed the
+## master's mark to another player instead; OnManagerChange).
 func _on_server_disconnected() -> void:
-	_reset_world()
-	_show_menu("The host left the match.")
+	_back_to_rooms("The room master left, so the room closed.")
 
-## Host: a new player takes the lowest free slot. Mid-round they sit out until the next one.
-func _on_peer_connected(id: int) -> void:
-	if mode != "host":
+## Host: nothing until the newcomer's hello says who they are.
+func _on_peer_connected(_id: int) -> void:
+	pass
+
+## Host: a newcomer's name, password and body (request_game_room_enter). A wrong password or
+## a full room turns them away; otherwise they take a slot (Room.join_slot) and, during a
+## battle, wait in the room for the next one.
+@rpc("any_peer", "call_remote", "reliable")
+func _net_hello(player_name: String, password: String, body: String) -> void:
+	var id := multiplayer.get_remote_sender_id()
+	if mode != "host" or roster.has(id):
+		return
+	if room_password != "" and password != room_password:
+		_refuse(id, front.system_text("Wrong_password"))
 		return
 	var slot := Room.join_slot(roster.values(), team_mode)
 	if slot < 0:
-		multiplayer.multiplayer_peer.disconnect_peer(id)
+		_refuse(id, front.system_text("Room_is_full"))
 		return
 	roster[id] = slot
-	_spawn(id, slot, false)
-	if round_active:
+	names[id] = player_name.strip_edges().left(15) if player_name.strip_edges() != "" else "Player %d" % (slot + 1)
+	bodies[id] = body if body in Bodies.NAMES else "zeid"
+	_spawn(id, slot, false, bodies[id])
+	if _match_on:
 		_sit_out(mechs[id])
 	_send_roster()
+	_room_notice("%s %s" % [names[id], front.text("text_29")])
+	_refresh_room()
 	_host_status()
-	if _auto_start > 0 and roster.size() >= _auto_start and round_number == 0 and Room.can_start(roster.values(), team_mode):
-		_start_next_round()
+	_advertise()
+	_maybe_auto_start()
+
+## Host: tell a newcomer why not, then let them go once the message is out.
+func _refuse(id: int, reason: String) -> void:
+	_net_refused.rpc_id(id, reason)
+	get_tree().create_timer(0.5).timeout.connect(func() -> void:
+		# The refused player usually hangs up first.
+		if mode == "host" and multiplayer.get_peers().has(id):
+			multiplayer.multiplayer_peer.disconnect_peer(id))
+
+@rpc("authority", "call_remote", "reliable")
+func _net_refused(reason: String) -> void:
+	_back_to_rooms(reason)
 
 func _on_peer_disconnected(id: int) -> void:
 	_remove_mech(id)
-	if mode == "host":
+	_sitting_out.erase(id)
+	if mode == "host" and roster.has(id):
+		var who := str(names.get(id, ""))
 		roster.erase(id)
+		names.erase(id)
+		bodies.erase(id)
 		_send_roster()
-		if roster.size() < 2:
-			round_active = false
-			_end_timer = -1.0
-			_next_round_timer = -1.0
-			hud.hide_result()
+		_room_notice("%s %s" % [who, front.text("text_30")])
+		# A battle with one player left is over: back to the room.
+		if _match_on and roster.size() < 2:
+			_net_to_room.rpc()
+			_to_room()
+		_refresh_room()
 		_host_status()
+		_advertise()
 
-## The host's slot list. A joiner learns its own slot here and builds everyone's mech; one who
-## joins mid-round sits out until the next round starts.
+## The host's slot list and the room. A joiner learns its own slot here and builds everyone's
+## mech; one who joins during a battle waits in the room until the next one starts.
 func _send_roster() -> void:
-	_net_roster.rpc(roster, round_number, round_active, map.id, spawn_points, team_mode)
+	_net_roster.rpc(roster, {
+		"round": round_number, "on": _match_on, "map": map_choice, "spawns": spawn_points,
+		"teams": team_mode, "names": names, "bodies": bodies, "name": room_name,
+		"beginner": room_beginner,
+	})
 
 @rpc("authority", "call_remote", "reliable")
-func _net_roster(list: Dictionary, number: int, active: bool, map_id: String, spawns: Array, teams: bool) -> void:
-	team_mode = teams
-	if map == null or map.id != map_id:
-		_use_map(map_id)
+func _net_roster(list: Dictionary, info: Dictionary) -> void:
+	team_mode = bool(info["teams"])
+	map_choice = str(info["map"])
+	names = info["names"]
+	bodies = info["bodies"]
+	room_name = str(info["name"])
+	room_beginner = bool(info["beginner"])
 	spawn_points.clear()
-	for i in spawns:
+	for i in info["spawns"]:
 		spawn_points.append(int(i))
 	var first := not mechs.has(local_id)
 	roster = list
@@ -697,24 +943,26 @@ func _net_roster(list: Dictionary, number: int, active: bool, map_id: String, sp
 		if not roster.has(id):
 			_remove_mech(id)
 	if first:
-		round_number = number
-		round_active = active
+		round_number = int(info["round"])
+		_match_on = bool(info["on"])
 	for id: int in roster:
 		if not mechs.has(id):
 			if id == local_id:
 				_spawn(id, int(roster[id]), true, body_choice, loadout_choice)
 			else:
-				_spawn(id, int(roster[id]), false)
-			# Whoever is new sits out a round already under way; those already playing send
+				_spawn(id, int(roster[id]), false, str(bodies.get(id, "zeid")))
+			# Whoever is new sits out a battle already under way; those already playing send
 			# their own state.
-			if active and (id == local_id or not first):
+			if _match_on and (id == local_id or not first):
 				_sit_out(mechs[id])
 	_apply_slots()
 	_set_mode("join")
-	_status = "You are player %d of %d%s.%s" % [int(roster[local_id]) + 1, roster.size(), _team_words(int(roster[local_id])),
-		" Waiting for the next round." if first and active else ""]
-	if team_mode and not round_active:
-		_status += " %s: change team." % _key("T", "TEAM")
+	_status = "You are player %d of %d%s." % [int(roster[local_id]) + 1, roster.size(), _team_words(int(roster[local_id]))]
+	if first:
+		front.clear_room_console()
+		_to_room()
+	else:
+		_refresh_room()
 
 ## Slots and teams from the roster onto the mechs (a team change moves a slot).
 func _apply_slots() -> void:
@@ -735,25 +983,124 @@ func _team_words(slot: int) -> String:
 			return ", blue team"
 	return ""
 
-## A player asks the host to move to the other side (MSERVER_ROOM_CHANGE_TEAM_SLOT_REQ),
-## between rounds only.
+## A player asks the host to move to the other side (MSERVER_ROOM_CHANGE_TEAM_SLOT_REQ):
+## T in the room.
 @rpc("any_peer", "call_remote", "reliable")
 func _net_change_team() -> void:
 	_change_team(multiplayer.get_remote_sender_id())
 
 func _change_team(id: int) -> void:
-	if mode != "host" or not team_mode or round_active or not roster.has(id):
+	if mode != "host" or not team_mode or not roster.has(id):
 		return
-	var to := Room.switch_slot(int(roster[id]), roster.values())
-	if to < 0:
+	_move_slot(id, Room.switch_slot(int(roster[id]), roster.values()))
+
+## A click on an empty slot asks to move there (ChangeTeamSlot, NetSendTeamChange); in team
+## battle that changes sides.
+func _ask_slot(slot: int) -> void:
+	if mode == "host":
+		_move_slot(local_id, slot)
+	elif mode == "join":
+		_net_move_slot.rpc_id(1, slot)
+
+@rpc("any_peer", "call_remote", "reliable")
+func _net_move_slot(slot: int) -> void:
+	_move_slot(multiplayer.get_remote_sender_id(), slot)
+
+## Host: in the room, not while the countdown runs, and only to an empty slot.
+func _move_slot(id: int, slot: int) -> void:
+	if mode != "host" or not _in_room or _countdown >= 0 or not roster.has(id):
 		return
-	roster[id] = to
+	if slot < 0 or slot >= Room.SIZE or roster.values().has(slot):
+		return
+	roster[id] = slot
 	_apply_slots()
 	_send_roster()
+	_refresh_room()
 	_host_status()
 
-## Off the field until the next round: not drawn, not counted, no input.
+## The master's map arrows (UpdateMapInfo, send_map_select): the next arena in room order.
+func _change_map(step: int) -> void:
+	if mode != "host" or not _in_room or _countdown >= 0:
+		return
+	var ids := _map_ids()
+	if ids.is_empty():
+		return
+	var i := ids.find(map_choice)
+	map_choice = ids[(maxi(i, 0) + step + ids.size()) % ids.size()]
+	_send_roster()
+	_refresh_room()
+	_host_status()
+
+static func _map_ids() -> Array[String]:
+	var out: Array[String] = []
+	for entry in BattleMap.list():
+		out.append(str(entry["id"]))
+	return out
+
+## Room chat (game_room_on_enter_chatting_msg): to everyone in the room, by way of the host.
+func _send_chat(line: String) -> void:
+	if not _networked():
+		return
+	_net_chat.rpc(line)
+	_show_chat(local_id, line)
+
+@rpc("any_peer", "call_remote", "reliable")
+func _net_chat(line: String) -> void:
+	_show_chat(multiplayer.get_remote_sender_id(), line.left(60))
+
+## GameRoomChatEventHandler: "name : message", your own lines in yellow.
+func _show_chat(id: int, line: String) -> void:
+	var who := str(names.get(id, "Player"))
+	front.room_console_add("%s : %s" % [who, line], FrontEnd.MY_NAME if id == local_id else Color.WHITE)
+
+## Game_Room_Notice_write: "System : ..." in green, on every machine.
+func _room_notice(msg: String) -> void:
+	_net_room_notice.rpc(msg)
+	_room_notice_local(msg)
+
+@rpc("authority", "call_remote", "reliable")
+func _net_room_notice(msg: String) -> void:
+	_room_notice_local(msg)
+
+func _room_notice_local(msg: String) -> void:
+	front.room_console_add("System : " + msg, FrontEnd.NOTICE)
+
+## What the game room page shows (FrontEnd.update_game_room).
+func _room_view() -> Dictionary:
+	var slots := {}
+	for id: int in roster:
+		var body := body_choice if id == local_id else str(bodies.get(id, "zeid"))
+		if mechs.has(id) and id != local_id:
+			body = (mechs[id] as Mech).body
+		slots[int(roster[id])] = {
+			"name": str(names.get(id, "Player %d" % (int(roster[id]) + 1))),
+			"face": Bodies.face(body),
+			"master": id == 1,
+			"me": id == local_id,
+			"playing": _match_on and not _sitting_out.has(id),
+		}
+	return {
+		"number": room_number, "name": room_name, "teams": team_mode, "playing": _match_on,
+		"beginner": room_beginner, "map": maxi(0, _map_ids().find(map_choice)),
+		"master": mode == "host", "slots": slots,
+	}
+
+func _refresh_room() -> void:
+	if _in_room or front.page == "room":
+		front.update_game_room(_room_view())
+
+## Host: the room as the room list shows it, announced on the local network.
+func _advertise() -> void:
+	if mode != "host":
+		return
+	front.lan.advertise({
+		"name": room_name, "locked": room_password != "", "teams": team_mode, "beginner": room_beginner,
+		"players": roster.size(), "playing": _match_on, "port": PORT,
+	})
+
+## Off the field until the next battle: not drawn, not counted, no input.
 func _sit_out(m: Mech) -> void:
+	_sitting_out[m.id] = true
 	m.sim.life = 0
 	m.sim.is_dead = true
 	m.sim.is_dead_complete = true
@@ -761,24 +1108,15 @@ func _sit_out(m: Mech) -> void:
 	m.exploded = true
 	m.view.visible = false
 
+## The status line under a battle, for the master: where the room can be reached.
 func _host_status() -> void:
-	var where := "Hosting %s%s on %s port %d. %d of %d players." % [map.title, " (team battle)" if team_mode else "",
-		", ".join(_lan_addresses()), PORT, roster.size(), MAX_PLAYERS]
+	var where := "Hosting %s on %s port %d. %d of %d players." % [room_name, ", ".join(_lan_addresses()), PORT, roster.size(), MAX_PLAYERS]
 	if team_mode:
 		var red := 0
 		for sl in roster.values():
 			if int(sl) < Room.HALF:
 				red += 1
 		where += " Red %d, blue %d." % [red, roster.size() - red]
-	if round_number == 0:
-		if Room.can_start(roster.values(), team_mode):
-			where += " %s: start the match." % _key("Enter", "START")
-		elif roster.size() >= 2:
-			where += " Teams must be even to start."
-		else:
-			where += " Waiting for players."
-	if team_mode and not round_active:
-		where += " %s: change team." % _key("T", "TEAM")
 	_status = where
 
 ## Owner's state, every physics tick. Unreliable: a newer one replaces a lost one.
@@ -1098,7 +1436,9 @@ func _physics_process(dt: float) -> void:
 	if _next_round_timer >= 0.0:
 		_next_round_timer -= dt
 		if _next_round_timer < 0.0:
-			_start_next_round()
+			_results_done()
+	if mode == "host":
+		_step_countdown(dt)
 	if _netlog:
 		_log_timer += dt
 		if _log_timer >= 1.0:
@@ -1120,10 +1460,13 @@ func _physics_process(dt: float) -> void:
 
 func _process(dt: float) -> void:
 	var me := _local()
-	if me:
+	# In the game room the page covers the battle; the mechs stay put away until it starts.
+	hud.visible = not _in_room
+	if me and not _in_room:
 		_update_camera(_watched(), dt)
 	for m: Mech in mechs.values():
-		_draw_mech(m, dt)
+		if not _in_room:
+			_draw_mech(m, dt)
 	var others := []
 	var board := []
 	for m: Mech in mechs.values():

@@ -13,7 +13,7 @@ extends Node2D
 ##
 ## The front end's controls follow engine/core/dialog.cpp: a push button shows texture 1, 2
 ## under the pointer and 3 while held, and plays select_button when let go; a check button
-## shows 3 while checked; a highlight button draws its label over the selectlight glow, which
+## shows 3 while checked, and so does a list row while it is the chosen one; a highlight button draws its label over the selectlight glow, which
 ## grows when the pointer comes in and flashes out when pressed. An edit box is a real text
 ## field (so phones get their keyboard) with no frame of its own: the art draws the box.
 
@@ -247,13 +247,13 @@ func text_get() -> String:
 	return editor.text if editor else text
 
 func focus_set() -> void:
-	if editor:
+	if editor and editor.is_inside_tree():
 		editor.grab_focus()
 
 # --- Controls -----------------------------------------------------------------------------
 
 func is_control() -> bool:
-	return kind in ["WINDOW_PUSHBUTTON", "WINDOW_CHECKBUTTON", "WINDOW_HIGHLIGHT_BUTTON"] and not disabled
+	return kind in ["WINDOW_PUSHBUTTON", "WINDOW_CHECKBUTTON", "WINDOW_HIGHLIGHT_BUTTON", "WINDOW_LISTBOXITEM"] and not disabled
 
 ## The deepest visible control under a point given in this window's parent space, searching
 ## the last drawn first.
@@ -284,7 +284,7 @@ func mouse_in() -> void:
 	match kind:
 		"WINDOW_PUSHBUTTON":
 			texture_switch(3 if held else 2)
-		"WINDOW_CHECKBUTTON":
+		"WINDOW_CHECKBUTTON", "WINDOW_LISTBOXITEM":
 			if not checked:
 				texture_switch(2)
 		"WINDOW_HIGHLIGHT_BUTTON":
@@ -297,7 +297,7 @@ func mouse_out() -> void:
 	match kind:
 		"WINDOW_PUSHBUTTON":
 			texture_switch(1)
-		"WINDOW_CHECKBUTTON":
+		"WINDOW_CHECKBUTTON", "WINDOW_LISTBOXITEM":
 			if not checked:
 				texture_switch(1)
 		"WINDOW_HIGHLIGHT_BUTTON":

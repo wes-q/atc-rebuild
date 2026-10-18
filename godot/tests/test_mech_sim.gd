@@ -63,6 +63,8 @@ func _init() -> void:
 	test_pulse_and_damage_stacks()
 	test_original_controls()
 	test_front_end()
+	test_lan_rooms()
+	test_room_pages()
 	print("\n%d passed, %d failed" % [passed, failures])
 	quit(1 if failures > 0 else 0)
 
@@ -1132,6 +1134,148 @@ func test_front_end() -> void:
 	check(not fe.tooltips_on, "OPTION: tooltips off")
 	fe.go_back()
 	check(fe.page == "main", "back from the options to the main menu")
+	fe.free()
+	OriginalUI.release_statics()
+	DirAccess.remove_absolute(ProjectSettings.globalize_path("user://test_profile.cfg"))
+
+static func _room_packet(id: String, room_name: String, locked: bool, teams: bool, players: int, playing: bool) -> String:
+	return JSON.stringify({"magic": LanRooms.MAGIC, "room": {"id": id, "name": room_name, "locked": locked,
+		"teams": teams, "beginner": false, "players": players, "playing": playing, "port": 7777}})
+
+func test_lan_rooms() -> void:
+	print("room list on the local network (LanRooms)")
+	var lan := LanRooms.new()
+	lan._heard(_room_packet("a", "Duel", false, false, 1, false), "192.168.1.5")
+	lan._heard(_room_packet("b", "Teams", true, true, 3, true), "192.168.1.6")
+	var rooms := lan.rooms()
+	check(rooms.size() == 2 and int(rooms[0]["number"]) == 1 and int(rooms[1]["number"]) == 2, "rooms are numbered in the order they were first heard")
+	check(not lan._heard("hello", "10.0.0.1") and not lan._heard(JSON.stringify({"magic": "other"}), "10.0.0.1"), "other packets are ignored")
+	check(not lan._heard(_room_packet("a", "Duel", false, false, 1, false), "127.0.0.1") and str(lan.rooms()[0]["address"]) == "192.168.1.5",
+		"the same room heard again changes nothing and keeps its first address")
+	check(lan._heard(_room_packet("a", "Duel", false, false, 2, false), "192.168.1.5") and int(lan.rooms()[0]["players"]) == 2, "a new player count is news")
+	lan._clock += LanRooms.EXPIRE + 0.1
+	lan._heard(_room_packet("b", "Teams", true, true, 3, true), "192.168.1.6")
+	lan._process(0.0)
+	check(lan.rooms().size() == 1 and str(lan.rooms()[0]["id"]) == "b", "a room not heard for 3.5 s drops off")
+	lan.free()
+	# A real announcement over the loopback: one copy hosts, another listens.
+	var host := LanRooms.new()
+	var listener := LanRooms.new()
+	if listener.listen():
+		host.advertise({"name": "Loop", "locked": false, "teams": false, "beginner": false, "players": 1, "playing": false, "port": 7777})
+		var first_id := str(host._info["id"])
+		host.advertise({"name": "Loop", "locked": false, "teams": false, "beginner": false, "players": 2, "playing": false, "port": 7777})
+		check(str(host._info["id"]) == first_id, "a room keeps its id as it changes")
+		host._process(1.0)
+		OS.delay_msec(100)
+		listener._process(0.0)
+		var heard := listener.rooms()
+		check(heard.size() == 1 and str(heard[0]["name"]) == "Loop" and int(heard[0]["players"]) == 2, "a broadcast announcement is heard on this machine")
+	else:
+		check(false, "the room list port %d is free for the loopback test" % LanRooms.PORT)
+	host.stop()
+	listener.stop_listening()
+	host.free()
+	listener.free()
+
+func test_room_pages() -> void:
+	print("room list and game room (page_custom_game, page_game_room)")
+	var fe := FrontEnd.new()
+	fe.profile_path = "user://test_profile.cfg"
+	root.add_child(fe)
+	if fe.screen == null:
+		fe._ready()
+	fe.player_name = "Tester"
+	fe.lan._heard(_room_packet("a", "Duel", false, false, 1, false), "192.168.1.5")
+	fe.lan._heard(_room_packet("b", "Teams", true, true, 3, true), "192.168.1.6")
+	fe.show_room_list()
+	var rows := fe._list_rows()
+	check(rows.get_child_count() == 2, "one row per room")
+	var r0 := rows.get_child(0) as OriginalUI
+	var r1 := rows.get_child(1) as OriginalUI
+	check(r0.w("room_name").text == "Duel" and r0.w("game_type").text == "SINGLE" and r0.w("status").text == "Waiting"
+		and r0.w("max_player").text == "1/12" and not r0.w("icon_lock").visible, "a row shows number, name, type, status and players")
+	check(r1.w("game_type").text == "TEAM" and r1.w("status").text == "Playing" and r1.w("icon_lock").visible, "a locked team room that is playing")
+	var bg := fe.page_root.get_node("res_dlg_custom_game_background") as OriginalUI
+	bg.w("battle_room_topic").w("type_button").clicked.emit()
+	check(fe._list_rows().get_child_count() == 1 and (fe._list_rows().get_child(0) as OriginalUI).w("room_name").text == "Duel", "the type button shows single battles only")
+	bg.w("battle_room_topic").w("type_button").clicked.emit()
+	bg.w("battle_room_topic").w("type_button").clicked.emit()
+	check(fe._list_rows().get_child_count() == 2, "and comes round to all again")
+	var joins := []
+	fe.room_join.connect(func(address: String, pw: String) -> void: joins.append([address, pw]))
+	bg.w("enter_button").clicked.emit()
+	check(fe.popup_root.get_child_count() == 1 and joins.is_empty(), "Enter with no room chosen says to choose one")
+	fe.popup_root.get_child(0).free()
+	r0 = fe._list_rows().get_child(0) as OriginalUI
+	r0.clicked.emit()
+	check(r0.checked and joins.is_empty(), "a click chooses a room")
+	r0.clicked.emit()
+	check(joins.size() == 1 and joins[0] == ["192.168.1.5", ""] and fe.joined_number == 1, "a second click enters it")
+	(fe._list_rows().get_child(1) as OriginalUI).clicked.emit()
+	bg.w("enter_button").clicked.emit()
+	var pw_box := fe.popup_root.get_child(0) as OriginalUI
+	check(pw_box.name == "res_dlg_custom_game_information" and joins.size() == 1, "a locked room asks for its password")
+	pw_box.w("dlg").w("input_password").editor.text = "secret"
+	pw_box.w("dlg").w("ok_button").clicked.emit()
+	check(joins.size() == 2 and joins[1] == ["192.168.1.6", "secret"], "and joins with it")
+	pw_box.free()
+	bg.w("battle_room_quick_go_edit_box").editor.text = "100.64.0.7"
+	bg.w("battle_room_quick_go_edit_box").submitted.emit("100.64.0.7")
+	check(joins.size() == 3 and joins[2] == ["100.64.0.7", ""], "Quick Go takes a host's address")
+	bg.w("battle_room_quick_go_edit_box").editor.text = ""
+	bg.w("battle_room_quick_go_edit_room_number").editor.text = "9"
+	bg.w("battle_room_quick_go_edit_room_number").submitted.emit("9")
+	check(joins.size() == 3 and fe.popup_root.get_child_count() == 1, "a room number nobody has is no room")
+	fe.popup_root.get_child(0).free()
+	var creates := []
+	fe.room_create.connect(func(n: String, pw: String, t: bool, b: bool) -> void: creates.append([n, pw, t, b]))
+	bg.w("create_game_button").clicked.emit()
+	var create := fe.popup_root.get_child(0) as OriginalUI
+	var dlg := create.w("dlg")
+	dlg.w("input_name_edit").editor.text = " spaced"
+	dlg.w("create_button").clicked.emit()
+	check(creates.is_empty() and fe.popup_root.get_child_count() == 2, "a name starting with a space is refused (text_10)")
+	fe.popup_root.get_child(1).free()
+	dlg.w("arrow_button").clicked.emit()
+	dlg.get_node("ResTypeSelectButton").w("team_battle_button").clicked.emit()
+	check(dlg.w("game_type_text").text == "TEAM" and dlg.w("game_type_text").visible, "the game type drops down and TEAM is picked")
+	dlg.w("input_name_edit").editor.text = "Friday"
+	dlg.w("input_pass_edit").editor.text = "pw"
+	dlg.w("create_button").clicked.emit()
+	check(creates.size() == 1 and creates[0] == ["Friday", "pw", true, true], "Create hosts a team room (beginner on for a new pilot)")
+	create.free()
+	# The game room as a joining player sees it: red slot 1 is you, blue slot 7 the master.
+	var view := {"number": 3, "name": "Friday", "teams": true, "playing": false, "beginner": true, "map": 2, "master": false,
+		"slots": {0: {"name": "Tester", "face": 2, "master": false, "me": true, "playing": false},
+			6: {"name": "Host", "face": 5, "master": true, "me": false, "playing": false}}}
+	fe.show_game_room(view)
+	var room := fe.page_root.get_node("res_dlg_game_room_background") as OriginalUI
+	var users := room.w("res_dlg_game_room_userlist")
+	check(room.w("room_number").text == "NO 3 " and room.w("room_name").text == "Friday" and room.w("game_type").text == "TEAM"
+		and room.w("status").text == "Waiting" and room.w("is_beginner").text == "Beginner Room", "the information bar")
+	check(room.w("res_dlg_game_room_game_option").w("game_map").current == 3 and not room.w("res_dlg_game_room_game_option").w("next_button").visible,
+		"the map banner, with no arrows for a player who is not the master")
+	check(not room.w("start_button").visible and room.w("red_team_mark").visible, "no START for a player; team marks in team battle")
+	var me := users.w("red_team").w("team_seed_1").w("charactor_info_option")
+	var master := users.w("blue_team").w("team_seed_7").w("charactor_info_option")
+	check(me.visible and me.w("name").text == "Tester" and me.w("name").text_color == FrontEnd.MY_NAME and me.w("pilot_list").current == 2,
+		"your slot: your name in yellow and your body's face")
+	check(master.w("manager_mark").visible and not me.w("manager_mark").visible, "the master's slot has the master's mark")
+	check(not users.w("red_team").w("team_seed_2").w("charactor_info_option").visible, "an empty slot shows nobody")
+	var moves := []
+	fe.room_slot.connect(func(sl: int) -> void: moves.append(sl))
+	users.w("blue_team").w("team_seed_8").clicked.emit()
+	check(moves == [7], "a click on a slot asks to move there")
+	view["master"] = true
+	fe.update_game_room(view)
+	check(room.w("start_button").visible and room.w("res_dlg_game_room_game_option").w("next_button").visible, "the master gets START and the map arrows")
+	fe.room_console_add("System : Host is come in", FrontEnd.NOTICE)
+	check(fe._room_lines.size() == 1 and fe._console_lines.is_empty(), "the room has its own console")
+	var exits := [0]
+	fe.room_exit.connect(func() -> void: exits[0] += 1)
+	fe.go_back()
+	check(exits[0] == 1, "back leaves the room")
 	fe.free()
 	OriginalUI.release_statics()
 	DirAccess.remove_absolute(ProjectSettings.globalize_path("user://test_profile.cfg"))

@@ -79,6 +79,12 @@ SOUNDS = [
     "sound/ui/mousein",            # the pointer over a highlight button
     "sound/ui/button_click",       # a highlight button let go
     "sound/ui/middle_poly_select", # entering the game from character select
+    "sound/ui/countdown 5-01",     # handle_start_game_ready: the room's start countdown, 5 to 1
+    "sound/ui/countdown 4-02",
+    "sound/ui/countdown 3-03",
+    "sound/ui/countdown 2-04",
+    "sound/ui/countdown 1-05",
+    "sound/ui/ready go",           # start_ready_go: READY and GO at the start of a battle
 ]
 
 # BGM::load play list in index order. A match plays rand() % 19; 19 is victory, 23 defeat.
