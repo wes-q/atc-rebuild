@@ -163,6 +163,9 @@ func refresh(sim: MechSim, me_name: String, status: String, round_time: float, c
 	_camera = camera
 	_nearest_id = nearest_id
 	var show_battle := sim != null
+	# The key help and the status line belong to a match; the front end has its own screens.
+	_help.visible = show_battle and not touch_help
+	_status.visible = show_battle or status != ""
 	for d in [booster, playtime, weapon, self_state, focus, radar]:
 		if d:
 			d.visible = show_battle

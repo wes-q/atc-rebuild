@@ -26,6 +26,51 @@ tables (robots, weapons, parts, shop catalogue) and never player, clan, log or b
 
 Record a scripted demo: `godot --path godot --write-movie out.avi --fixed-fps 30 --quit-after 300 -- autopilot`
 
+## Front end (Step 13, from `page_login_new.lua`, `page_charactor.lua`, `page_main_menu.lua`,
+`page_main_menu_option.lua`, `main.lua` and the engine's `dialog.cpp`)
+
+The game opens on the original's screens, in English, built from its window tables and art:
+
+1. **Login:** the ATC Online backdrop with ID and PASS boxes, ACCESS and EXIT. The ID is
+   your player name (kept between runs); the password is ignored. Then the loading screen.
+2. **Character select:** your pilot panel (name, PVT, an empty record) and the body's
+   pre-rendered turntable. The arrows step through the five bodies in place of a server's
+   character list; ENTER goes on, EXIT shows the intro picture for 4 s and closes the game.
+3. **Main menu:** MATCH, TUTORIAL, ITEM SHOP, CHANNEL, OPTION and EXIT down the left, the
+   chat console in the middle (normal, whisper and clan tabs, the chat line, scrolling), the
+   channel's player list and the friend and clan lists on the right.
+   - MATCH and ITEM SHOP open the classic menu (host, join, map, mode, loadout) until the
+     original room list (step 14) and shop page (step 15) replace it. TUTORIAL starts practice.
+   - CHANNEL opens the channel box, pre-filled "raycrash-"; EXIT goes back to character select.
+   - The console shows your own lines and the front end's notices; there is no server to chat
+     through yet.
+4. **Option:** the BGM and EFFECT volume bars, the music test player (play, stop, next, with
+   the track name), window mode on or off (full screen) and tooltips on or off, all kept
+   between runs.
+
+How it behaves, from the engine:
+- **Buttons:** push buttons show their second image under the pointer and the third while
+  held, and play `select_button` when let go. Highlight buttons draw the `selectlight` glow
+  behind their label: it grows from 100 to 150 x 15 in 0.1 s with `mousein`, flashes out to
+  400 x 0 in 0.2 s when pressed, and `button_click` plays when let go. Check buttons are the
+  tabs. The pointer must still be on a button when let go for it to count.
+- **Tooltips:** the original English texts in a box at the pointer less (50, 80), wrapped and
+  top-aligned as `DrawText` did without `DT_SINGLELINE`.
+- **Message boxes:** the dimmed screen, the `sys_message` panel and its OK button.
+- **Cursor:** the animated pointer, frames 1-6-1 over 0.6 s on every click, hotspot (8, 11).
+  The battle keeps the system pointer.
+- **Music:** "Good Luck (Ver2)" from login through the menus (BGM 3).
+- **Backdrop:** character select, the main menu and the options are drawn over the space
+  map's sky alone, seen from 320 units up: the menus' `interface_map` loads map01's skymap
+  and no objects (inferred: no screenshot of the menus survives).
+- **Fonts:** the original drew text with Windows' Gulim, Verdana, Tahoma and Impact, which are
+  not in the archive; the nearest system fonts stand in.
+- **Android's back button** steps back through the screens: a popup, then options, the main
+  menu and character select, and from login it quits.
+
+Open a screen directly for testing: `godot --path godot -- front=character` (or `main`,
+`option`); `-- classic` opens the classic menu.
+
 ## Multiplayer: up to 12, free-for-all or teams
 
 Start the game on computers on the same network. One picks the mode (free-for-all or team
@@ -494,6 +539,10 @@ parts added to the base stats.
 - Within one draw order the original drew sibling windows in Lua's hash order, which is
   not recoverable. Text windows are drawn last so names stay readable (inferred).
 - The results screen is this recreation's own panel, not the original's result page.
+- Character select's centre portrait, rotating title text and create/delete pages come from
+  files missing from the archive (`charactor_select_my_charactor_show` and others); the
+  turntable and pilot panel are shown without them. Alicia's turntable lacks its last frame.
+- The option page's backdrop art and key setting page are not in the archive and are left out.
 - The original drew HUD text with its own bitmap font; Godot's default font stands in.
 - City's sky uses `mount01.png`, which is not in the archive, so that part draws untextured.
 - The original's bullet wall test cast its ray backward from the previous position, so it
@@ -524,7 +573,8 @@ scripts/game.gd          modes, networking, rounds, hits, camera, target dummy, 
 scripts/battle_world.gd  scenery and effects: arena, sky, lights, booster flames, hits, wall crash, explosion
 scripts/battle_map.gd    an arena's bounds, start points, lights and the edge bounce
 scripts/map_collision.gd wall triangles on a plane grid: sphere and segment tests
-scripts/start_menu.gd    practice, host and join menu
+scripts/start_menu.gd    the classic practice, host and join menu (behind MATCH and ITEM SHOP for now)
+scripts/front_end.gd     the original's login, character select, main menu and options
 scripts/touch_controls.gd on-screen sticks and buttons for phones
 scripts/hud.gd           the original battle HUD: dialogs, radar, markers, name tags
 scripts/original_ui.gd   the engine's UI windows, built from the exported Lua tables
@@ -535,6 +585,7 @@ tools/extract_db.py         reads game tables straight out of the SQL Server 200
 tools/inspect_import.gd     prints an imported model's tree and clips
 tools/render_poses.gd       renders the mech at several facings
 tools/render_map.gd         renders an arena from above with its walls, bounds and start points
+tools/ui_demo.gd            drives the front end with synthetic input, for checking it
 tools/extract_ui.py         reads the HUD window tables and particle scripts, copies their art
-tests/test_mech_sim.gd      221 checks against the original database values and rules
+tests/test_mech_sim.gd      231 checks against the original database values and rules
 ```

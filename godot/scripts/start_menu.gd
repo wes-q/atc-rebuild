@@ -7,6 +7,8 @@ extends CanvasLayer
 signal practice_chosen
 signal host_chosen
 signal join_chosen(address: String)
+## Back to the original main menu.
+signal back_chosen
 
 var _address: LineEdit
 var _message: Label
@@ -119,6 +121,8 @@ func _ready() -> void:
 	_address.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_child(_address)
 	_button(row, "Join", func() -> void: join_chosen.emit(_address.text.strip_edges()))
+
+	_button(box, "Back to the main menu", func() -> void: back_chosen.emit())
 
 	_message = Label.new()
 	_message.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER

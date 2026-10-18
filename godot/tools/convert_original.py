@@ -75,6 +75,10 @@ SOUNDS = [
     "sound/common/bullet_defense4",
     "sound/common/bullet_defense5",
     "sound/common/bullet_defense6",
+    "sound/ui/select_button",      # a push button let go
+    "sound/ui/mousein",            # the pointer over a highlight button
+    "sound/ui/button_click",       # a highlight button let go
+    "sound/ui/middle_poly_select", # entering the game from character select
 ]
 
 # BGM::load play list in index order. A match plays rand() % 19; 19 is victory, 23 defeat.

@@ -16,6 +16,13 @@ const VOICES := 24
 ## Plane position under the camera.
 var listener := Vector2.ZERO
 var enabled := true
+## The options page's BGM and EFFECT bars, 0 to 1.
+var music_volume := 1.0:
+	set(v):
+		music_volume = clampf(v, 0.0, 1.0)
+		if _music:
+			_music.volume_db = linear_to_db(maxf(music_volume, 0.0001))
+var effects_volume := 1.0
 
 var _voices: Array[AudioStreamPlayer] = []
 var _panners: Array[AudioEffectPanner] = []
@@ -77,7 +84,7 @@ func _play(sound: String, volume: float, pan: float) -> void:
 	_next = (_next + 1) % VOICES
 	_panners[i].pan = pan
 	_voices[i].stream = stream
-	_voices[i].volume_db = linear_to_db(volume)
+	_voices[i].volume_db = linear_to_db(maxf(volume * effects_volume, 0.0001))
 	_voices[i].play()
 
 func _stream(sound: String) -> AudioStream:
@@ -104,8 +111,20 @@ func play_bgm(index: int) -> void:
 	var stream := (load(path) as AudioStreamOggVorbis).duplicate() as AudioStreamOggVorbis
 	stream.loop = index != BGM_VICTORY and index != BGM_DEFEAT
 	_music.stream = stream
-	_music.volume_db = 0.0
+	_music.volume_db = linear_to_db(maxf(music_volume, 0.0001))
 	_music.play()
+
+## The track name the options page's player shows: the file name without its folder.
+func bgm_name(index: int) -> String:
+	if index < 0 or index >= _bgm.size() or _bgm[index] == null:
+		return ""
+	return str(_bgm[index]).get_basename()
+
+func bgm_count() -> int:
+	return _bgm.size()
+
+func is_playing_bgm() -> bool:
+	return _music.playing
 
 func play_battle_bgm() -> void:
 	play_bgm(randi() % BGM_BATTLE_COUNT)

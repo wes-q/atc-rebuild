@@ -22,7 +22,8 @@ import sys
 
 # Dialogs page_game_fight:create() builds for a battle, plus the ready and go banners.
 ROOT_PREFIXES = ("res_dlg_game_fight", "texture_dlg_game_fight")
-SOURCES = ["script/res", "script/page/page_game_fight.lua", "script/page/page_number_show.lua"]
+SOURCES = ["script/res", "script/page/page_game_fight.lua", "script/page/page_number_show.lua",
+           "script/main.lua"]
 # Drawn from C++ rather than a window table: Radar::init and the low-health warning.
 EXTRA_IMAGES = [
     "ui/widget/game_fight/rader/hood_player_enemy.png",
@@ -35,6 +36,14 @@ EXTRA_IMAGES = [
     "ui/widget/game_fight/rader/fughtui_locked.PNG",
     "ui/widget/game_fight/rader/fughtui_locking.PNG",
     "texture/zeid_sword_jan02.BMP",
+    # The front end's art named in script code rather than tables: the highlight glow, the
+    # animated cursor (page_login_new), the loading screen (Loading_window_create) and the
+    # exit picture (I_robot_img_show).
+    "ui/widget/selectlight.PNG",
+    "ui/widget/test/cursor01.PNG", "ui/widget/test/cursor02.PNG", "ui/widget/test/cursor03.PNG",
+    "ui/widget/test/cursor04.PNG", "ui/widget/test/cursor05.PNG", "ui/widget/test/cursor06.PNG",
+    "ui3/loading/loading.png", "ui3/loading/x-259-y-443.png", "ui3/loading/x-264 y459.png",
+    "ui3/loading/intro.png",
 ]
 
 TOKEN = re.compile(
@@ -200,8 +209,63 @@ class Parser:
             return out
         return items
 
+    def if_statement(self, target: dict | None) -> None:
+        """An if block. The language switch (game_global.is_game_text_eng) is evaluated as
+        English and that branch's assignments are kept; any other condition is skipped."""
+        self.next()
+        cond = []
+        while self.peek()[0] != "eof" and self.peek() != ("name", "then"):
+            cond.append(self.next()[1])
+        self.next()
+        english = None
+        if "is_game_text_eng" in cond:
+            wants_true = "false" not in cond
+            if "~=" in cond:
+                wants_true = not wants_true
+            english = wants_true
+        take = english is True
+        while True:
+            stop = self.statements(target if take else None)
+            if stop == "elseif":
+                while self.peek()[0] != "eof" and self.peek() != ("name", "then"):
+                    self.next()
+                self.next()
+                take = False
+            elif stop == "else":
+                take = english is False
+            else:
+                return
+
+    def statements(self, target: dict | None) -> str:
+        """Statements up to the block's elseif, else or end (returned, consumed). Assignments
+        go into target, or are skipped when it is None."""
+        while self.peek()[0] != "eof":
+            kind, val = self.peek()
+            if kind == "name" and val in ("elseif", "else", "end"):
+                self.next()
+                return val
+            if kind == "name" and val == "if":
+                self.if_statement(target)
+                continue
+            if kind == "name" and val in BLOCK_OPEN | {"repeat"}:
+                self.skip_block()
+                continue
+            if kind == "name" and val == "local":
+                self.next()
+                continue
+            if kind == "name" and self.peek(1) == ("op", "="):
+                self.next()
+                self.next()
+                v = self.value()
+                if target is not None:
+                    target[val] = v
+                continue
+            self.next()
+        return "eof"
+
     def chunk(self) -> dict:
-        """Top-level "name = value" statements; everything else is skipped."""
+        """Top-level "name = value" statements, and the English branch of language switches;
+        everything else is skipped."""
         globals_: dict = {}
         while self.peek()[0] != "eof":
             kind, val = self.peek()
@@ -210,6 +274,9 @@ class Parser:
                     self.next()
                     continue
                 self.skip_block()
+                continue
+            if kind == "name" and val == "if":
+                self.if_statement(globals_)
                 continue
             if kind == "name" and val in BLOCK_OPEN | {"repeat"}:
                 self.skip_block()
@@ -284,18 +351,28 @@ def copy_image(src: pathlib.Path, dst: pathlib.Path) -> None:
         subprocess.run(["sips", "-s", "format", "png", str(src), "--out", str(dst)], check=True, capture_output=True)
 
 
+def _is_window(v: dict) -> bool:
+    t = v.get("type")
+    return isinstance(t, (str, dict)) and str(t.get("@ref", "") if isinstance(t, dict) else t).startswith("WINDOW_")
+
+
 def main() -> None:
     data_dir = pathlib.Path(sys.argv[1]).resolve()
     out_dir = pathlib.Path(sys.argv[2]).resolve() / "ui"
     files: list[pathlib.Path] = []
     for rel in SOURCES:
         p = data_dir / rel
-        files += sorted(p.glob("*.lua")) if p.is_dir() else [p]
+        # A *_kor.lua file redefines its English twin's tables with the Korean art. The menus
+        # use English, so the Korean files load first and the English ones replace them.
+        files += sorted(p.glob("*.lua"), key=lambda f: (not f.stem.endswith("_kor"), f.name)) if p.is_dir() else [p]
     globals_: dict = {}
     for f in files:
         globals_.update(Parser(tokenize(f.read_bytes().decode("cp949", errors="replace"))).chunk())
 
-    windows = {name: resolve(v, globals_) for name, v in globals_.items() if name.startswith(ROOT_PREFIXES) and isinstance(v, dict)}
+    # The battle HUD's dialogs, and every other window table (menus, login, rooms, shop) so the
+    # recreation can rebuild the original's screens.
+    windows = {name: resolve(v, globals_) for name, v in globals_.items()
+               if isinstance(v, dict) and (name.startswith(ROOT_PREFIXES) or _is_window(v) or name.startswith("texture_"))}
     images: set[str] = set()
     collect_images(windows, images)
     images.update(EXTRA_IMAGES)
@@ -348,6 +425,12 @@ def main() -> None:
         chunk = Parser(tokenize(src.read_bytes().decode("cp949", errors="replace"))).chunk()
         tables.update({k: resolve(v, chunk) for k, v in chunk.items() if isinstance(v, (dict, list))})
     (out_dir / "parameters.json").write_text(json.dumps(tables, ensure_ascii=False, indent=1), encoding="utf-8")
+    # The English game text (tooltips, system messages, character info), as data.
+    text_src = data_dir / "script" / "page" / "game_text_eng.lua"
+    texts = Parser(tokenize(text_src.read_bytes().decode("cp949", errors="replace"))).chunk()
+    texts = {k: resolve(v, texts) for k, v in texts.items() if isinstance(v, dict)}
+    (out_dir / "texts.json").write_text(json.dumps(texts, ensure_ascii=False, indent=1), encoding="utf-8")
+    print(f"text tables: {sorted(texts)[:10]}")
     print(f"parameter tables: {sorted(tables)[:12]}")
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "particles.json").write_text(json.dumps(particles, indent=1), encoding="utf-8")

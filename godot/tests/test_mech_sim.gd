@@ -61,6 +61,8 @@ func _init() -> void:
 	test_touch_controls()
 	test_equip_rules()
 	test_pulse_and_damage_stacks()
+	test_original_controls()
+	test_front_end()
 	print("\n%d passed, %d failed" % [passed, failures])
 	quit(1 if failures > 0 else 0)
 
@@ -1058,3 +1060,78 @@ func test_pulse_and_damage_stacks() -> void:
 	check(sim.damage_stacks.size() == 15, "each lasts 10 s")
 	run(sim, it, 0.2)
 	check(sim.damage_stacks.is_empty() and near(sim.damage_taken_mul(), 1.0), "then wears off")
+
+func _button(kind: String) -> OriginalUI:
+	var art := "ui3/page_login/login_access0%d.png"
+	return OriginalUI._build("b", {"type": kind, "size": [125, 30], "pos": [10, 20],
+		"texture": {"list": [art % 1, art % 2, art % 3], "fixedsize": 1}})
+
+func test_original_controls() -> void:
+	print("original controls (dialog.cpp)")
+	var push := _button("WINDOW_PUSHBUTTON")
+	var clicks := [0]
+	push.clicked.connect(func() -> void: clicks[0] += 1)
+	push.mouse_in()
+	var hover := push.current
+	push.press()
+	var down := push.current
+	push.release(true)
+	check(hover == 2 and down == 3 and push.current == 2 and clicks[0] == 1, "push button: 2 under the pointer, 3 held, a click when let go on it")
+	push.press()
+	push.release(false)
+	push.mouse_out()
+	check(clicks[0] == 1 and push.current == 1, "let go off it: no click, back to 1")
+	var check_button := _button("WINDOW_CHECKBUTTON")
+	check_button.set_checked(true)
+	check_button.mouse_out()
+	check(check_button.current == 3, "check button stays on 3 while checked")
+	var light := _button("WINDOW_HIGHLIGHT_BUTTON")
+	light.highlight_size = Vector2(150, 50)
+	light.mouse_in()
+	light._process(0.1)
+	check(light._glow.is_equal_approx(Vector2(150, 15)), "highlight: the glow grows to 150 x 15 in 0.1 s")
+	light.press()
+	light._process(0.2)
+	check(light._glow.is_equal_approx(Vector2(400, 0)), "and flashes out to 400 x 0 when pressed")
+	var parent := OriginalUI.new()
+	parent.position = Vector2(100, 100)
+	parent.add_child(push)
+	check(parent.control_at(Vector2(150, 130)) == push and parent.control_at(Vector2(50, 50)) == null, "the control under a point, through its parents")
+	parent.free()
+	check_button.free()
+	light.free()
+
+func test_front_end() -> void:
+	print("front end (page_main_menu, page_main_menu_option)")
+	var fe := FrontEnd.new()
+	fe.profile_path = "user://test_profile.cfg"
+	root.add_child(fe)
+	if fe.screen == null:
+		fe._ready()
+	fe.screen.scale = Vector2.ONE
+	fe.screen.position = Vector2.ZERO
+	fe.player_name = "Tester"
+	fe.show_main_menu()
+	var battles := [0]
+	fe.battle_requested.connect(func() -> void: battles[0] += 1)
+	var battle: OriginalUI = fe.page_root.find_child("battle_button", true, false)
+	var at := fe._page_pos(battle) + battle._hit_size() * 0.5
+	var e := InputEventMouseButton.new()
+	e.button_index = MOUSE_BUTTON_LEFT
+	e.position = at
+	e.pressed = true
+	fe._input(e)
+	var up := e.duplicate() as InputEventMouseButton
+	up.pressed = false
+	fe._input(up)
+	check(battles[0] == 1, "clicking MATCH asks for a battle")
+	check(fe.text("text_103") == "Go to battle room list" and battle.tooltip == fe.text("text_103"), "its tooltip is the original's English text")
+	fe.show_options()
+	var off: OriginalUI = fe.page_root.find_child("tooltip_check_box_off_button", true, false)
+	off.clicked.emit()
+	check(not fe.tooltips_on, "OPTION: tooltips off")
+	fe.go_back()
+	check(fe.page == "main", "back from the options to the main menu")
+	fe.free()
+	OriginalUI.release_statics()
+	DirAccess.remove_absolute(ProjectSettings.globalize_path("user://test_profile.cfg"))

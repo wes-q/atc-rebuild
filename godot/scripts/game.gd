@@ -91,6 +91,8 @@ var touch: TouchControls
 var _touch_mode := DisplayServer.is_touchscreen_available() or OS.get_cmdline_user_args().has("touch")
 var sound: GameSound
 var menu: StartMenu
+## The original's login, character select, main menu and options (scripts/front_end.gd).
+var front: FrontEnd
 var mechs: Dictionary = {} ## id -> Mech
 var stats: Dictionary = {} ## id -> Stats
 var wins: Dictionary = {} ## id -> rounds won this session
@@ -182,6 +184,18 @@ func _ready() -> void:
 	sound = GameSound.new()
 	add_child(sound)
 	sound.enabled = not OS.get_cmdline_user_args().has("mute")
+	front = FrontEnd.new()
+	front.sound = sound
+	front.visible = false
+	add_child(front)
+	front._load_profile()
+	if _arg_str("body=") == "":
+		body_choice = front.body
+	front.practice_requested.connect(func() -> void:
+		body_choice = front.body
+		start_practice())
+	front.battle_requested.connect(func() -> void: _show_classic(""))
+	front.shop_requested.connect(func() -> void: _show_classic(""))
 	add_child(hud)
 	multiplayer.peer_connected.connect(_on_peer_connected)
 	multiplayer.peer_disconnected.connect(_on_peer_disconnected)
@@ -197,8 +211,22 @@ func _ready() -> void:
 		start_join(args[i + 1] if i + 1 < args.size() else "127.0.0.1")
 	elif args.has("practice") or _autopilot:
 		start_practice()
+	elif args.has("classic"):
+		_show_classic("")
 	else:
-		_show_menu("")
+		_set_mode("")
+		_menu_backdrop()
+		# Test option: front=character, main or option opens that page directly.
+		match _arg_str("front="):
+			"character":
+				front.show_character()
+			"main":
+				front.show_main_menu()
+			"option":
+				front.set_shown(true)
+				front.show_options()
+			_:
+				front.show_login()
 
 static func _arg_str(prefix: String) -> String:
 	for a in OS.get_cmdline_user_args():
@@ -220,8 +248,36 @@ func _is_authority() -> bool:
 
 # --- Modes ------------------------------------------------------------------------------
 
+## Out of a match: back to the original's main menu, with any message in its message box.
 func _show_menu(message: String) -> void:
 	_set_mode("")
+	_status = ""
+	if menu:
+		menu.visible = false
+	if touch:
+		touch.visible = false
+	_menu_backdrop()
+	front.show_main_menu(message)
+
+## Behind the front end: the space map's sky alone, seen from 320 units up (the menus'
+## interface_map loads map01's skymap and no objects; the camera sits at (0, -320, 0)).
+func _menu_backdrop() -> void:
+	_use_map("space")
+	if map_node:
+		for c in map_node.get_children():
+			(c as Node3D).visible = c == sky
+	depth = 320.0
+	cam_from = Vector3(0, -depth, 0)
+	camera.position = Vector3(0, depth, 0)
+	camera.look_at(Vector3.ZERO, Vector3(0, 0, -1))
+	if sky:
+		BattleWorld.place_sky(sky, camera)
+
+## The classic menu (host, join, map, body, loadout) that Battle and Shop open until the
+## original room list and shop page replace them.
+func _show_classic(message: String) -> void:
+	_set_mode("")
+	front.set_shown(false)
 	if menu == null:
 		menu = StartMenu.new()
 		add_child(menu)
@@ -231,6 +287,12 @@ func _show_menu(message: String) -> void:
 		menu.select_map(map_choice)
 		menu.select_body(body_choice, loadout_choice)
 		menu.select_mode(team_mode)
+		menu.back_chosen.connect(func() -> void:
+			body_choice = menu.body_id
+			front.body = body_choice
+			front.save_profile()
+			_show_menu(""))
+	menu.select_body(body_choice, loadout_choice)
 	menu.visible = true
 	menu.show_message(message)
 	if touch:
@@ -239,12 +301,18 @@ func _show_menu(message: String) -> void:
 func _hide_menu() -> void:
 	if touch:
 		touch.visible = true
+	front.set_shown(false)
+	# The arena comes back in full after the menus' sky-only backdrop.
+	if map_node:
+		for c in map_node.get_children():
+			(c as Node3D).visible = true
 	if menu:
 		menu.visible = false
 		map_choice = menu.map_id
 		body_choice = menu.body_id
 		loadout_choice = menu.loadout
 		team_mode = menu.team_mode
+		front.body = body_choice
 
 ## Builds the arena if it is not the one already showing.
 func _use_map(id: String) -> void:
@@ -367,10 +435,19 @@ func _lan_addresses() -> Array[String]:
 		out.append("127.0.0.1")
 	return out
 
+func _exit_tree() -> void:
+	# The menus' animated cursor and the shared UI caches go before the renderer does.
+	Input.set_custom_mouse_cursor(null)
+	OriginalUI.release_statics()
+
 ## Android's back button: out of a match to the menu, and from the menu out of the app.
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_WM_GO_BACK_REQUEST:
-		if mode != "":
+		if front and front.visible:
+			front.go_back()
+		elif menu and menu.visible:
+			_show_menu("")
+		elif mode != "":
 			_reset_world()
 			_show_menu("")
 		else:
@@ -541,6 +618,9 @@ func _mechs_in_slot_order() -> Array:
 func _mech_name(m: Mech) -> String:
 	if m.id == DUMMY_ID:
 		return "Target"
+	# Your login name for your own mech; other players' names come with the room (step 14).
+	if m.local and front and front.player_name != "":
+		return front.player_name
 	return "Player %d" % (m.slot + 1)
 
 func _mech_label(m: Mech) -> String:
