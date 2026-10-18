@@ -36,6 +36,10 @@ EXTRA_IMAGES = [
     "ui/widget/game_fight/rader/fughtui_locked.PNG",
     "ui/widget/game_fight/rader/fughtui_locking.PNG",
     "texture/zeid_sword_jan02.BMP",
+    # Step 17: the Plasma Wire's chain (rcEffect.cpp) and the Blind Beam's screen
+    # (radar.cpp BlindBeamState).
+    "texture01/Chain.png",
+    "ui2/game_fight/blind_eff.png",
     # The front end's art named in script code rather than tables: the highlight glow, the
     # animated cursor (page_login_new), the loading screen (Loading_window_create) and the
     # exit picture (I_robot_img_show).

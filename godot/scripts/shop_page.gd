@@ -313,7 +313,7 @@ func _refresh() -> void:
 ## with why: the original's text_125 for another body's, a note for one not in yet.
 func item_tip(id: int, item_name: String, robots: int, ok: bool, inven: bool) -> Dictionary:
 	var w := GameData.weapon_row(id)
-	var preview := "ITEM TYPE %s\nDAMAGE %d\nRELOAD TIME %d\nAMMO %d\nCOST ENERGY %d" % [str(int(w.get("weapon_type", 0))),
+	var preview := "ITEM TYPE %s\nDAMAGE %d\nRELOAD TIME %d\nAMMO %d\nCOST ENERGY %d" % [str(int(_num(w.get("weapon_type")))),
 		int(_num(w.get("damage"))), int(_num(w.get("re_load_time"))), int(_num(w.get("ammo"))), int(_num(w.get("cost_energy")))]
 	var info := front.weapon_text(id)
 	if not ok:

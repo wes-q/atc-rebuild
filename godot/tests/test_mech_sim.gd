@@ -67,6 +67,8 @@ func _init() -> void:
 	test_room_pages()
 	test_shop_page()
 	test_state_rate()
+	test_step17_states()
+	test_step17_shots()
 	print("\n%d passed, %d failed" % [passed, failures])
 	quit(1 if failures > 0 else 0)
 
@@ -1041,7 +1043,7 @@ func test_equip_rules() -> void:
 	check(Bodies.choices("zeid", 3) == [17, 46, 48, 49] and Bodies.choices("alicia", 3) == [25, 46, 47], "specials by body, AP Drain shared by Zeid and Alicia")
 	check(not Bodies.choices("alicia", 0).has(27) and not Bodies.choices("deff", 0).has(34), "disabled shop rows (Whip, Crasher) are not offered")
 	check(Bodies.checked_loadout("zeid", [21, 37, 4, 17]) == [1, 37, 4, 17], "another body's sword falls back to the default")
-	check(Bodies.checked_loadout("zeid", [28, 3, 42, 17]) == [28, 3, 4, 17], "a weapon not ported yet (PTL) falls back too")
+	check(Bodies.checked_loadout("zeid", [28, 3, 42, 49]) == [28, 3, 42, 49], "every weapon the shop sold is playable (PTL Type 1, Teleport Beam)")
 	check(Bodies.shield_id("gigas") == 9 and Bodies.shield_id("alicia") == 22, "the shield is the body's own, never chosen")
 	var sim := MechSim.new("redkite", Original.START_WEAPON, [30, 38, 43, 18])
 	check(sim.slots[0].data.name == "Crescent Type 1" and sim.slots[2].data.name == "CP Cannon" and sim.shield.id == 16, "a chosen loadout reaches the slots; the shield stays")
@@ -1366,3 +1368,100 @@ func test_state_rate() -> void:
 	remote.step_remote(1.0 / 60.0)
 	remote.step_remote(1.0 / 60.0)
 	check(remote.real_pos.x > at.x and is_equal_approx(remote.real_pos.y, at.y), "a remote mech keeps moving between states")
+
+static func _held(fire := false) -> MechSim.Intent:
+	var it := MechSim.Intent.new()
+	it.fire = fire
+	it.aim = Vector2(1000, 0)
+	return it
+
+func test_step17_states() -> void:
+	print("step 17 states (World::state_change by weapon id, rcPlayerState.cpp)")
+	var m := MechSim.new("redkite", 1)
+	m.reset_at(Vector2.ZERO, 0)
+	m.start_state(GameData.weapon(51))
+	var it := _held()
+	it.right = true
+	for i in 30:
+		m.step(it, 1.0 / 60.0)
+	check(m.is_frozen() and m.is_nodamage() and m.pos.distance_to(Vector2.ZERO) < 0.01, "Freezing Beam: frozen in place, keys ignored, no damage taken")
+	m.start_state(GameData.weapon(50))
+	check(m.reverse_time == 0.0, "a frozen mech takes no new state")
+	for i in 600:
+		m.step(_held(), 1.0 / 60.0)
+	check(not m.is_frozen(), "the freeze ends after 10 s")
+	m.start_state(GameData.weapon(50))
+	var x0 := m.pos.x
+	for i in 30:
+		m.step(it, 1.0 / 60.0)
+	check(m.pos.x < x0 - 10.0, "R.Control Beam: the right key moves left")
+	var f := MechSim.new("zeid", 1)
+	f.start_state(GameData.weapon(48))
+	check(is_equal_approx(f.damage_taken_mul(), 0.7), "D Fielder: damage taken x 0.7")
+	var p := MechSim.new("alicia", 1)
+	p.start_state(GameData.weapon(47))
+	check(is_equal_approx(p.power_recovery, 1.5) and is_equal_approx(p.power_reduce, 0.7), "Power Up Pulse: booster recovery x 1.5, use x 0.7 (booster_recovery, booster_reduce)")
+	p.booster_gage = 1000.0
+	p._spend(100.0)
+	check(is_equal_approx(p.booster_gage, 930.0), "a weapon's energy cost x 0.7 while it lasts")
+	var g := MechSim.new("deff", 2)
+	g.start_state(GameData.weapon(57))
+	check(g.weapon_index == 1, "Plasma Wire: a mech holding its third weapon is put on the second")
+	var k := _held()
+	k.weapon_key = 3
+	g.step(k, 1.0 / 60.0)
+	check(g.weapon_index == 1, "and cannot take the third while wired")
+	var o := MechSim.new("gigas", 1)
+	o.reset_at(Vector2.ZERO, 0)
+	o.over_boost_time = MechSim.OVER_BOOST_TIME
+	var b := _held()
+	b.right = true
+	b.boost = true
+	for i in 3:
+		o.step(b, 1.0 / 60.0)
+	check(is_equal_approx(o._last_vel, o.vel_limit), "Over Booster: a boost runs at vel_limit at once")
+	o.teleport_to(Vector2(500, 300))
+	check(o.pos == Vector2(500, 300) and o.speed_state == 0 and o.move_dir == Vector2.ZERO, "Teleport Beam: the shooter there, stopped")
+
+func test_step17_shots() -> void:
+	print("step 17 shots (rcAmmo.cpp, copy_weapon_data_to_net)")
+	check(is_equal_approx(GameData.weapon(48).life, 4.4) and is_equal_approx(GameData.weapon(29).reload, 15.1),
+		"(BYTE) wraps: D Fielder life 30000 -> 4.4 s, Claw Type 1 reload 66386 -> 15.1 s")
+	# CP.Pulse Cannon: 1 + charge level rounds (charge_repeat_shot).
+	var c := MechSim.new("deff", 2, [14, 13, 45, 55])
+	var shots := [0]
+	c.fired.connect(func(_p: Vector2, _d: int) -> void: shots[0] += 1)
+	for i in 70:
+		c.step(_held(true), 1.0 / 60.0)
+	var level := c.charge_level
+	for i in 120:
+		c.step(_held(false), 1.0 / 60.0)
+	check(level == 3 and shots[0] == 1 + level, "CP.Pulse Cannon: charged to 3 in 1.17 s, then 4 rounds")
+	# use_bullet_start_time: the MP7-C3's first round leaves at once.
+	var a := MechSim.new("alicia", 1, [21, 36, 24, 25])
+	var first := [0]
+	a.fired.connect(func(_p: Vector2, _d: int) -> void: first[0] += 1)
+	a.step(_held(true), 1.0 / 60.0)
+	a.step(_held(true), 1.0 / 60.0)
+	var sr := MechSim.new("zeid", 1, [1, 3, 4, 17])
+	var sr_first := [0]
+	sr.fired.connect(func(_p: Vector2, _d: int) -> void: sr_first[0] += 1)
+	sr.step(_held(true), 1.0 / 60.0)
+	sr.step(_held(true), 1.0 / 60.0)
+	check(first[0] == 1 and sr_first[0] == 0, "MP7-C3: the first round leaves on the next update (bullet_start_time 0); the SR-3's waits its continuous_time")
+	var b := Bullet.new()
+	b.setup(Vector2.ZERO, 0, c, GameData.weapon(45), null, 5)
+	check(is_equal_approx(b.speed, GameData.weapon(45).bullet_speed * 1.5) and b.power == 30, "a charged round: speed and damage x (1 + 0.1 x level)")
+	var d := Bullet.new()
+	d.setup(Vector2.ZERO, 0, c, GameData.weapon(48))
+	check(not d.hits(Vector2.ZERO, 100.0), "the D Fielder's object never collides (collision_type 0)")
+	var ptl := Bullet.new()
+	ptl.setup(Vector2.ZERO, 0, c, GameData.weapon(42))
+	check(ptl.child_count() == 6, "PTL Type 1 breaks into 6")
+	ptl.proximity_fuse(true)
+	check(is_equal_approx(ptl.life, 0.1), "and an enemy within 120 cuts its time to 0.1 s")
+	var mp := Bullet.new()
+	mp.setup(Vector2.ZERO, 0, c, GameData.weapon(36))
+	check(mp.child_count() == 2 and is_equal_approx(mp.life, 0.1), "MP7-C3: 0.1 s, then 2")
+	for x in [b, d, ptl, mp]:
+		x.free()

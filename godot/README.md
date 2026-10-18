@@ -462,9 +462,10 @@ available.
   for a body is listed (disabled rows like the Whip and Crasher are not).
 - **The shield is fixed:** no shield was ever sold, so each body keeps its own.
 - **Other players see your loadout:** it travels with your state, like your body.
-- **Ported now (33 weapons):** every default weapon, every sword (Spear, Dagger, Claw,
-  Crescent, Rapier, Axe, Twin Blade, H-Blade and the body swords), the H.P Beam Rifle,
-  P.Pulse Gun, Impact Pulse-Gun, Viper Smart Gun and CP Cannon.
+- **Every weapon the shop sold (48):** every default weapon, every sword (Spear, Dagger,
+  Claw, Crescent, Rapier, Axe, Twin Blade, H-Blade and the body swords), the H.P Beam Rifle,
+  P.Pulse Gun, Impact Pulse-Gun, Viper Smart Gun and CP Cannon, and since step 17 the last 15
+  (below).
   - **P.Pulse Gun:** a 6-shot burst, each bullet turned at random within 30 degrees
     (`angle_randomness`).
   - **Impact Pulse-Gun:** each hit adds 10% to the damage the target takes, up to 2.5x, each
@@ -474,11 +475,74 @@ available.
   - **Void Pulse (Alicia's default special):** no damage. Using it makes her intangible for
     5 s: bullets, beams, swords and splash pass through, and she is drawn see-through
     (`PulseState`, "a pulse that can ignore external damage").
-- **Listed but not yet (15 weapons):** MP7-C3, Fragment Cannon, PTL Type 1, Napalm Thrower,
-  CP.Pulse Cannon, AP Drain Gun, Power Up Pulse, D Fielder, Teleport Beam, R.Control Beam,
-  Freezing Beam Gun, Leech Bomb, Over Booster, Blind Beam, Plasma Wire. They need mechanics
-  of their own (split and homing child shots, linked hits, damage over time, teleporting,
-  freezing, reversed controls, the chain) and show as "not yet" in the menu.
+
+**The last fifteen** (Step 17, from `world.cpp` `state_change` and `process_link_hit`,
+`rcPlayerState.cpp`, `rcAmmo.cpp` `create_child`, `rcManager.cpp`, `rcPlayer.cpp`, `radar.cpp`
+and `rcEffect.cpp`). The original picks each effect by the weapon's id and hard-codes its
+time; the database's `state_limit_time` is never read, so several times below differ from it
+(the Blind Beam and R.Control Beam run 10 s, not 8; the D Fielder's field 10 s, not 30).
+Numbers are the database's, packed and unpacked as the server and client did.
+- **MP7-C3 (Alicia gun):** two guns firing in turn, 2 rounds a click (the first at once,
+  the second 0.13 s on), 4 clicks a magazine then a 2.1 s reload. A round that flies its
+  0.1 s without hitting breaks into two Sub_Missile rounds at -4 and +4 degrees (7 damage,
+  0.7 s). A direct hit does 18 and splits nothing.
+- **Fragment Cannon (Gigas gun):** on a hit, on a mech or a wall, a fragment leaves 30 units
+  on at a fixed 400 units/s for 13 damage (25 less 12), toward the hit mech's nearest
+  teammate within 600, else the mech nearest it; after a wall, the shooter's nearest enemy
+  within 600, else anyone nearest; else a random way. Up to 4 links. Fragments ignore
+  sides: one that meets a teammate or its own shooter is taken up with no damage and still
+  links. This cannon alone can hit its own shooter, once a round is 0.2 s out.
+- **PTL Type 1 (Zeid heavy):** a straight 55-damage torpedo whose time is cut to 0.1 s once
+  an enemy is within 120 units of it; when its time runs out it bursts into six
+  Chield_Missile rounds 60 degrees apart (7 damage, 2 s), each homing hard (guided 101) on
+  the shooter's nearest enemy within 600 of the burst. A direct hit bursts nothing.
+- **Napalm Thrower (Gigas heavy):** a 50-damage splash round with no radius. The mech it hits
+  burns for 5 ticks a second apart, each a quarter of the hit (12, or 4 through a guard: a
+  guard cuts the hit to 0.32 but does not stop the burn). Each round that lands adds a burn
+  of its own.
+- **CP.Pulse Cannon (Deff heavy):** a charge weapon: hold to charge one level every 0.3 s up
+  to 9, draining 70 booster a second until full; let go for 1 + level rounds 0.1 s apart,
+  each 20 + 2 x level damage and 10% faster per level, 15 booster each.
+- **AP Drain Gun (Zeid, Alicia special):** a 10 hit, then for 10 s the target loses 4 a
+  second and the shooter gains it, up to full.
+- **Power Up Pulse (Alicia special):** the shooter and every living teammate within 600
+  (the shooter alone in free-for-all): for 10 s booster recovery x 1.5, booster use, weapon
+  energy and energy drained by others x 0.7. Its round still flies, and in the original an
+  enemy it hits gets the same boost; that is kept.
+- **D Fielder (Zeid special):** the same 600-unit circle: damage taken x 0.7 for 10 s. The
+  generator it drops does nothing more and is gone after 4.4 s.
+- **Teleport Beam (Zeid special):** its beam leaves 0.5 s after the click; the shooter goes
+  to wherever it is when the button is let go, or when it ends, hits a mech (no damage) or
+  meets a wall, stopped, fading back in over about 2 s. Hold to go further.
+- **R.Control Beam (Red Kite special):** 10 s of swapped movement keys (left and right, up
+  and down). Aim and firing are untouched.
+- **Freezing Beam Gun (Red Kite special):** 10 s frozen: no movement, no attacks, and no
+  damage taken and no new state either. An ice block, not a slow.
+- **Leech Bomb (Gigas special):** flies 0.2 s, stops and waits for an enemy within 400,
+  then chases for 1.5 s, like the X-Mine. The mech it hits carries a bomb: 30 s on, or the
+  moment any damage lands on it, it goes off for 50 within 198 units, falling off by
+  tenths, x 1.2 close in, to everyone (victim, allies and shooter). A teammate's shot
+  through the carrier defuses it. Each hit adds its own bomb.
+- **Over Booster (Gigas special):** for 10 s a boost runs at top speed at once, with no
+  build-up; the gauge drains as usual. `busterup.x` shows on the mech.
+- **Blind Beam (Deff special):** 10 s of `blind_eff.png` over your own screen, under the HUD
+  panels, with the radar's player dots and the name tags gone.
+- **Plasma Wire (Deff special):** a 10 hit that chains the two for 15 s: past 100 units
+  apart the target is reeled toward the shooter at 1.5 x the distance a second and the
+  shooter toward the target at 0.5 x; the target cannot use its third weapon. The chain
+  (`texture01/Chain.png`) grows from the shooter at 500 units a second.
+
+Who decides: as for every hit, the hit mech's machine decides its damage and its state and
+tells everyone; burns, drains and the leech bomb's timer run on that machine. Split rounds
+and fragments fly on every screen from the same shots, with no messages of their own, as
+in the original. The teleport and the shooter's buffs are the shooter's machine's call.
+
+Corrections to the weapons from before, found with these: the server's (BYTE) packing wraps
+rather than clamps (the Claw Type 1's reload is 15.1 s, not 25.5); every charge weapon's
+round is faster by its charge, x (1 + level x charge_add_damage), which speeds up the Plasma
+Bow's and Viper's charged shots; the H.P Beam Rifle and Viper fire their first round on the
+click (`use_bullet_start_time`); and the Void Pulse's round, which has no collision type,
+never hits anything.
 
 ## Weapons (from `weapon_parameter.lua`, `weapon_mode_parameter.lua`, `rcAmmo.cpp`, `rcCombo.cpp`)
 
@@ -646,7 +710,15 @@ parts added to the base stats.
 
 - The fight HUD's weapon icons stop at id 25, so weapons from the shop's later ranges show
   no icon in the weapon panel, as in the original.
-- The Napalm Thrower's held model (`anim03/g_napalm.x`) crashes the converter; it is skipped.
+- The Napalm Thrower's attack clips (`anim03/g_napalm.x`) crash assimp's glTF exporter, as
+  they move two frames the file does not have; the converter writes them itself and drops
+  those two tracks.
+- Step 17, inferred: the Plasma Wire chain's width (the original's "1" is in units not
+  traced); a hit that does no damage (a second Leech Bomb, an EMP) leaves a leech bomb be,
+  where the original's release with 0 would defuse it; the AP drain's mark has no particles,
+  as its script defines another effect's under the wrong name; the R.Control and Freezing
+  beams have no collision_checker, so in the original both machines applied them, which
+  here is the hit mech's machine alone.
 - One `WeaponInfo` column could not be named from the backup's metadata. The server's own query
   identifies it as `continuous_time`, the gap between shots.
 - The fire animation length (0.5 s) comes from the converted clip; the original playback rate
@@ -738,5 +810,5 @@ tools/ui_demo.gd            drives the front end with synthetic input, for check
 tools/room_demo.gd          joins a room another copy hosts, through the room list, with synthetic input
 tools/shop_demo.gd          equips a weapon in the item shop with synthetic input
 tools/extract_ui.py         reads the HUD window tables and particle scripts, copies their art
-tests/test_mech_sim.gd      281 checks against the original database values and rules
+tests/test_mech_sim.gd      300 checks against the original database values and rules
 ```

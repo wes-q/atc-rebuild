@@ -610,6 +610,14 @@ func _clear_bullets() -> void:
 		b.queue_free()
 	bullets.clear()
 	swings.clear()
+	# The step 17 states end with the round.
+	_ticks.clear()
+	for id in _leeches.keys():
+		_drop_leech(id)
+	for t: Dictionary in _tethers:
+		(t["node"] as Node3D).queue_free()
+	_tethers.clear()
+	_fading.clear()
 
 func _lan_addresses() -> Array[String]:
 	var out: Array[String] = []
@@ -1561,6 +1569,7 @@ func _nearest_enemy(of: Mech, alive_only := true) -> Mech:
 func _physics_process(dt: float) -> void:
 	if round_active:
 		round_time += dt
+	_step_tethers(dt)
 	for m: Mech in mechs.values():
 		if m.local:
 			var can_act := round_active and m.sim.life > 0
@@ -1594,6 +1603,8 @@ func _physics_process(dt: float) -> void:
 	_step_bullets(dt)
 	_step_beams(dt)
 	_step_swings(dt)
+	_step_ticks(dt)
+	_step_leeches(dt)
 	_check_round_end()
 	if _end_timer >= 0.0:
 		_end_timer -= dt
@@ -1612,7 +1623,11 @@ func _physics_process(dt: float) -> void:
 			var parts: Array[String] = []
 			for m: Mech in mechs.values():
 				var flags := (" G" if m.sim.guarding else "") + (" C" if m.sim.is_confused() else "") + (" J" if m.local and hud.jam_time > 0.0 else "") \
-					+ (" P" if m.sim.is_pulse() else "") + (" D%d" % m.sim.damage_stacks.size() if not m.sim.damage_stacks.is_empty() else "")
+					+ (" P" if m.sim.is_pulse() else "") + (" D%d" % m.sim.damage_stacks.size() if not m.sim.damage_stacks.is_empty() else "") \
+					+ (" FRZ" if m.sim.freeze_time > 0.0 else "") + (" REV" if m.sim.reverse_time > 0.0 else "") + (" BLD" if m.sim.blind_time > 0.0 else "") \
+					+ (" FLD" if m.sim.field_time > 0.0 else "") + (" PWR" if m.sim.power_time > 0.0 else "") + (" WIRE" if m.sim.gravity_time > 0.0 else "") \
+					+ (" OVB" if m.sim.over_boost_time > 0.0 else "") + (" LEECH" if _leeches.has(m.id) else "") \
+					+ (" TICK%d" % _ticks.filter(func(t: Array) -> bool: return t[0] == m.id).size() if _ticks.any(func(t: Array) -> bool: return t[0] == m.id) else "")
 				parts.append("%s%d s%d t%d %s%s pos=(%d,%d) hp=%d sh=%d%s" % ["me" if m.local else "peer", m.id, m.slot, m.team, m.body, str(m.weapons).replace(" ", ""), m.sim.pos.x, m.sim.pos.y, m.sim.life, m.sim.durability, flags])
 			var mines := 0
 			var lying := 0
@@ -1639,6 +1654,7 @@ func _process(dt: float) -> void:
 	for m: Mech in mechs.values():
 		if not _in_room:
 			_draw_mech(m, dt)
+	_draw_tethers()
 	var others := []
 	var board := []
 	for m: Mech in mechs.values():
@@ -1648,6 +1664,8 @@ func _process(dt: float) -> void:
 		board.append([m.slot, Bodies.face(m.body), float(maxi(0, m.sim.life)) / float(m.sim.life_max), _mech_name(m), m.sim.life > 0])
 	hud.team_mode = team_mode
 	hud.my_team = me.team if me else Room.NONE
+	# BlindBeamState covers your own screen.
+	hud.blind = me != null and me.sim.blind_time > 0.0
 	hud.board = board
 	hud.show_board = (Input.is_physical_key_pressed(KEY_TAB) or _hold_tab or (touch != null and touch.players)) and me != null
 	if touch:
@@ -1703,8 +1721,15 @@ func _draw_mech(m: Mech, dt: float) -> void:
 	_low_health_sparks(m, dt)
 	if m.view.guarding != m.sim.guarding:
 		m.view.set_guard(m.sim.guarding)
-	# PulseState: drawn see-through (stealth_alpha 150).
-	m.view.set_ghost(m.sim.is_pulse())
+	# PulseState: drawn see-through (stealth_alpha 150); after a teleport, fading back in.
+	var alpha := MechView.GHOST_ALPHA if m.sim.is_pulse() else 1.0
+	if _fading.has(m.id):
+		_fading[m.id] = float(_fading[m.id]) + TELEPORT_FADE * dt
+		if float(_fading[m.id]) >= 1.0:
+			_fading.erase(m.id)
+		else:
+			alpha = minf(alpha, float(_fading[m.id]))
+	m.view.set_alpha(alpha)
 	# rcPlayer::move returns early in BEHAVE_GUARD: the guard pose holds while walking.
 	if m.sim.is_dead or m.sim.guarding or m.view.is_attack_playing() or m.view.is_reacting() or m.view.is_drawing():
 		return
@@ -1782,6 +1807,11 @@ func _mouse_on_plane(m: Mech) -> Vector2:
 ## spreads each round within reverse_range_angle (Plasma Shock Wave).
 func _on_local_fired(m: Mech, deg: int) -> void:
 	var w := m.sim.weapon
+	if _netlog:
+		print("  fired %s by %d" % [w.name, m.id])
+	# Power Up Pulse and D Fielder: the shooter's machine gives the state to its side.
+	if w.id in [47, 48]:
+		_buff_allies(m, w)
 	var hands := maxi(1, m.view.muzzle_count())
 	var shot := m.sim.shot_index
 	var switch_shot := int(w.param_num("switch_shot")) == 1 and hands > 1
@@ -1806,7 +1836,7 @@ func _on_local_fired(m: Mech, deg: int) -> void:
 		if spread > 0:
 			aim = (aim + randi() % spread - spread / 2 + 360) % 360
 		var origin := m.view.muzzle_plane_pos(hand)
-		var charge := maxi(0, m.sim.charge_level)
+		var charge := maxi(0, m.sim.charge_level) if w.is_charge() else 0
 		_launch(origin, aim, m, w.id, m.burst_target, charge)
 		if _networked() and m.local:
 			_net_fire.rpc(origin, aim, w.id, m.burst_target, charge, clip)
@@ -1820,6 +1850,10 @@ func _launch(origin: Vector2, deg: int, shooter: Mech, weapon_id: int, target: i
 	var start_fx := Bodies.scene_path(str(w.mode.get("bullet_start_xfile", "")))
 	if start_fx != "":
 		BattleWorld.spawn_effect(self, start_fx, BattleWorld.effect_basis(), origin, 1.0)
+	# Over Booster: OverBoosterState on the shooter, everywhere, with busterup.X on it.
+	if weapon_id == 53:
+		shooter.sim.over_boost_time = MechSim.OVER_BOOST_TIME
+		_state_mark(shooter, OVER_BOOST_MARK, MechSim.OVER_BOOST_TIME)
 	if w.is_immediate():
 		_add_beam(origin, deg, shooter, w)
 		return
@@ -1906,7 +1940,7 @@ func _owns(m: Mech) -> bool:
 ## a pierce shot goes through but still sounds on the shield. The damage that lands is cut by
 ## the attacker's confusion (mul_to_damage). Returns false if nothing landed.
 func _apply_hit(victim: Mech, attacker: int, amount: int, weapon_id: int, from := NO_FROM) -> bool:
-	if not round_active or not _owns(victim) or victim.sim.life <= 0:
+	if not round_active or not _owns(victim) or victim.sim.life <= 0 or victim.sim.is_nodamage():
 		return false
 	if from != NO_FROM and victim.sim.guards_against(from):
 		if Combat.guard_rule(GameData.weapon(weapon_id).weapon_type) == Combat.Guard.BLOCK:
@@ -1924,6 +1958,11 @@ func _apply_hit(victim: Mech, attacker: int, amount: int, weapon_id: int, from :
 	_record_hit(victim.id, attacker, amount, victim.sim.life, weapon_id)
 	if _networked() and victim.local:
 		_net_hit.rpc(attacker, amount, victim.sim.life, weapon_id)
+	# add_damage: a leech bomb on the mech goes off at any damage that lands. A hit that does
+	# none (another Leech Bomb, an EMP) leaves it be (inferred: the original's release with 0
+	# would defuse it; that path is kept for a teammate's shot only).
+	if _leeches.has(victim.id) and amount > 0:
+		_leech_release(victim, true)
 	return true
 
 ## A guard met a hit on this machine's mech: show it everywhere. blocked: the durability it
@@ -1959,27 +1998,21 @@ func _show_guarded(victim: Mech, weapon_id: int, blocked: int, broke: bool) -> v
 func _on_guard_changed(m: Mech, on: bool) -> void:
 	sound.play_at("sound/common/guard" if on else "sound/common/guard_cancel", m.sim.pos)
 
-## World::state_change, decided by the machine of the mech hit and sent to everyone.
-func _state_change(victim: Mech, weapon_id: int, count := 1) -> void:
-	_show_state(victim, weapon_id, count)
-	if _networked() and victim.local:
-		_net_state_change.rpc(weapon_id, count)
-
-@rpc("any_peer", "call_remote", "reliable")
-func _net_state_change(weapon_id: int, count: int) -> void:
-	var id := multiplayer.get_remote_sender_id()
-	if mechs.has(id):
-		_show_state(mechs[id], weapon_id, count)
-
 ## state_action_type 5 (Confusing Beam): the slow-down on every machine and spark.x on the
 ## mech for confusion_time. 4 (EMP Shock Gun): fourth_new_zeid_spark.x on the mech for
 ## jamming_time; the original sent one per player in the splash loop, so they pile up.
-func _show_state(victim: Mech, weapon_id: int, count: int) -> void:
+func _show_state(victim: Mech, weapon_id: int, count: int, attacker := 0) -> void:
+	# NoDamageState (frozen): no new state takes.
+	if victim.sim.is_nodamage():
+		return
 	var w := GameData.weapon(weapon_id)
+	if _show_new_state(victim, w, count, attacker):
+		return
 	var time := 0.0
 	if w.state_action_type == 6:
-		# World::state_change case 41: booster_gage -= 200 x (1 + charge_add_damage x charge).
-		victim.sim.booster_gage = maxf(0.0, victim.sim.booster_gage - 200.0 * (1.0 + w.param_num("charge_add_damage") * count))
+		# World::state_change case 41: booster_gage -= 200 x (1 + charge_add_damage x charge),
+		# x 0.7 under a Power Up Pulse (state_booster_reduce_ratio, NetManager.cpp 2311).
+		victim.sim.booster_gage = maxf(0.0, victim.sim.booster_gage - 200.0 * (1.0 + w.param_num("charge_add_damage") * count) * victim.sim.power_reduce)
 		return
 	if w.state_action_type == 9:
 		# case 40: AddDamageState for 10 s, with weapon01/defence_down.x while the stack lasts.
@@ -2000,6 +2033,389 @@ func _show_state(victim: Mech, weapon_id: int, count: int) -> void:
 		var fx := BattleWorld.spawn_effect(victim.view, path, BattleWorld.effect_basis(1.0), Vector2.ZERO, time)
 		if fx:
 			MechView.play_effect(fx, true)
+
+# --- Step 17: the last fifteen weapons ----------------------------------------------------
+# World::state_change picks the effect by weapon id; the client hard-codes the times (the
+# database's state_limit_time is never read). Ticks, the leech bomb and the tether run on the
+# machine that owns the mech they act on, like any damage; the marks show everywhere.
+
+## DOTState (Napalm Thrower): 5 ticks a second apart, each 0.25 of the hit (send_damage 95).
+const BURN_TICKS := 5
+const BURN_SHARE := 0.25
+const BURN_MARK := "res://assets/original/x/weapon01/fire_burn.gltf"
+## ApDrainState (AP Drain Gun): 10 ticks of 4 a second apart; the attacker gains what the
+## victim loses, up to full (send_damage 97, World::damage_respond).
+const DRAIN_TICKS := 10
+const DRAIN_AMOUNT := 4
+const DRAIN_MARK := "res://assets/original/x/weapon01/drain_target_effect.gltf"
+## LeechBombState: 30 s on the victim, then it goes off; any damage that lands sets it off
+## first, and a teammate's shot through the victim defuses it (RG_STATE_RELEASE_REQ). The
+## blast: Weapon52_mode1 splash_damage 50 over splash_area 600 / 100 x 0.33 x 100 = 198 units,
+## to every mech, the victim, its allies and the attacker included (send_damage 96).
+const LEECH_TIME := 30.0
+const LEECH_DAMAGE := 50.0
+const LEECH_RADIUS := 198.0
+const LEECH_MODEL := "res://assets/original/x/weapon01/leech_bomb.gltf"
+const LEECH_BLAST := "res://assets/original/x/weapon/third_gigas_boom.gltf"
+const LEECH_DEFUSED := "res://assets/original/x/weapon/yokyuk_explo.gltf"
+## GravityState (Plasma Wire): 15 s; past 100 units apart the victim is drawn toward the
+## attacker at 1.5 x the distance a second and the attacker toward the victim at 0.5 x.
+const TETHER_TIME := 15.0
+const TETHER_SLACK := 100.0
+const TETHER_VICTIM_PULL := 1.5
+const TETHER_ATTACKER_PULL := 0.5
+## rcEffect.cpp's chain: texture01/Chain.png, grown from the attacker at 500 units a second.
+const CHAIN_TEXTURE := "res://assets/original/ui/texture01/chain.png"
+const CHAIN_GROW := 500.0
+const CHAIN_TILE := 15.0
+const CHAIN_WIDTH := 12.0 ## the original's width of 1 is in units this port could not trace (inferred)
+## The marks the other states show on the mech, for their time (world.cpp state_change): all
+## of them 10 s (FREEZE_TIME, REVERSE_TIME and the rest in MechSim).
+const STATE_TIME := 10.0
+const STATE_MARKS := {
+	47: "res://assets/original/x/weapon01/booster_rgn_down.gltf",
+	48: "res://assets/original/x/weapon01/d_shield.gltf",
+	50: "res://assets/original/x/weapon01/reverse.gltf",
+	51: "res://assets/original/x/weapon01/freezed.gltf",
+	55: "res://assets/original/x/weapon01/blind_01.gltf",
+}
+## OverBoosterState: 10 s with weapon01/busterup.X on the mech.
+const OVER_BOOST_MARK := "res://assets/original/x/weapon01/busterup.gltf"
+## Weapons whose hit starts a state on the one hit (state_action_type != 0, by id).
+const HIT_STATES := [46, 47, 50, 51, 52, 55, 57]
+## World::process_link_hit (Fragment Cannon): links fly at a fixed 400, the damage less 12
+## (additional_damage, -12.5 truncated), starting 30 units from the hit.
+const LINK_SPEED := 400.0
+const LINK_DAMAGE_CUT := 12
+const LINK_OFFSET := 30.0
+## The Fragment Cannon alone may hit its own shooter, 0.2 s into a bullet's flight.
+const SELF_HIT_AGE := 0.2
+## is_teleport: the shooter fades back in at 120 of 255 a second.
+const TELEPORT_FADE := 120.0 / 255.0
+
+## [victim id, attacker id, weapon id, ticks left, time to the next, amount] for the burns
+## and drains on mechs this machine owns.
+var _ticks: Array = []
+## Leech bombs by victim id: {attacker, time, node}. Every machine draws them; the owner times
+## them and sets them off.
+var _leeches: Dictionary = {}
+## Plasma Wire tethers: {attacker, victim, time, length, node}.
+var _tethers: Array = []
+## Teleport fade-in left, by mech id (alpha rises from 0).
+var _fading: Dictionary = {}
+
+## A hit's state on the mech hit, decided where the mech is owned and shown everywhere.
+## count: the hit's damage for the burn, otherwise as before (charge level, splash count).
+func _state_change(victim: Mech, weapon_id: int, count := 1, attacker := 0) -> void:
+	_show_state(victim, weapon_id, count, attacker)
+	if _networked():
+		_net_state_change.rpc(victim.id, weapon_id, count, attacker)
+
+@rpc("any_peer", "call_remote", "reliable")
+func _net_state_change(victim_id: int, weapon_id: int, count: int, attacker: int) -> void:
+	if mechs.has(victim_id):
+		_show_state(mechs[victim_id], weapon_id, count, attacker)
+
+## The step 17 states; false for a weapon that is not one of them.
+func _show_new_state(victim: Mech, w: GameData.Weapon, count: int, attacker: int) -> bool:
+	match w.id:
+		44:
+			_state_mark(victim, BURN_MARK, float(BURN_TICKS))
+			if _owns(victim):
+				_ticks.append([victim.id, attacker, 44, BURN_TICKS, 1.0, int(count * BURN_SHARE)])
+		46:
+			_state_mark(victim, DRAIN_MARK, float(DRAIN_TICKS))
+			if _owns(victim):
+				_ticks.append([victim.id, attacker, 46, DRAIN_TICKS, 1.0, DRAIN_AMOUNT])
+		47, 48, 50, 51, 55:
+			victim.sim.start_state(w)
+			_state_mark(victim, STATE_MARKS[w.id], STATE_TIME)
+		57:
+			victim.sim.start_state(w)
+			_add_tether(attacker, victim.id)
+		52:
+			_add_leech(attacker, victim)
+		_:
+			return false
+	return true
+
+func _state_mark(victim: Mech, path: String, time: float) -> void:
+	if not ResourceLoader.exists(path):
+		return
+	var fx := BattleWorld.spawn_effect(victim.view, path, BattleWorld.effect_basis(1.0), Vector2.ZERO, time)
+	if fx:
+		MechView.play_effect(fx, true)
+
+## Power Up Pulse and D Fielder (rcManager.cpp shoot): the shooter and every living
+## teammate within pulse_dist or defense_field_dist of it; in free-for-all the shooter alone.
+func _buff_allies(shooter: Mech, w: GameData.Weapon) -> void:
+	var reach := w.param_num("pulse_dist") if w.id == 47 else w.param_num("defense_field_dist")
+	for o: Mech in mechs.values():
+		if o.sim.life <= 0 or o.sim.pos.distance_to(shooter.sim.pos) > reach:
+			continue
+		if o == shooter or Room.teammates(o.team, shooter.team):
+			_state_change(o, w.id, 1, shooter.id)
+
+## Burn and drain ticks, on this machine's own mechs.
+func _step_ticks(dt: float) -> void:
+	for i in range(_ticks.size() - 1, -1, -1):
+		var t: Array = _ticks[i]
+		if not mechs.has(t[0]):
+			_ticks.remove_at(i)
+			continue
+		t[4] -= dt
+		if t[4] > 0.0:
+			continue
+		t[4] += 1.0
+		t[3] -= 1
+		_special_hit(mechs[t[0]], t[1], t[5], t[2], t[2] == 46)
+		if t[3] <= 0:
+			_ticks.remove_at(i)
+
+## send_damage with a special index (burn 95, leech 96, drain 97): no guard and no leech
+## trigger, on a mech this machine owns. drain: the attacker gains the same.
+func _special_hit(victim: Mech, attacker: int, amount: int, weapon_id: int, drain := false) -> void:
+	if not round_active or victim.sim.life <= 0 or victim.sim.is_nodamage() or victim.sim.is_pulse() or amount <= 0:
+		return
+	victim.sim.take_damage(amount)
+	_record_hit(victim.id, attacker, amount, victim.sim.life, weapon_id)
+	if drain:
+		_drained(attacker, amount)
+	if _networked() and victim.local:
+		_net_special_hit.rpc(attacker, amount, victim.sim.life, weapon_id, drain)
+
+@rpc("any_peer", "call_remote", "reliable")
+func _net_special_hit(attacker: int, amount: int, remaining: int, weapon_id: int, drain: bool) -> void:
+	_record_hit(multiplayer.get_remote_sender_id(), attacker, amount, remaining, weapon_id)
+	if drain:
+		_drained(attacker, amount)
+
+## The drain's other half, on the attacker's own machine: life back, up to full.
+func _drained(attacker: int, amount: int) -> void:
+	if mechs.has(attacker) and _owns(mechs[attacker]):
+		var a: Mech = mechs[attacker]
+		if a.sim.life > 0:
+			a.sim.life = mini(a.sim.life_max, a.sim.life + amount)
+
+# Leech Bomb ------------------------------------------------------------------------------
+
+## Each hit adds its own bomb with its own 30 s (a LeechBombState per hit). Every machine adds
+## them in the same order, from the same reliable messages, so a bomb's place in the list
+## names it.
+func _add_leech(attacker: int, victim: Mech) -> void:
+	var node: Node3D = null
+	if ResourceLoader.exists(LEECH_MODEL):
+		node = (load(LEECH_MODEL) as PackedScene).instantiate() as Node3D
+		victim.view.add_child(node)
+		# Drawn on the victim, -5 to +4 units off on each axis (rcPlayerState.cpp).
+		node.transform = Transform3D(BattleWorld.effect_basis(1.0), Original.to_godot(Vector2(randi_range(-5, 4), randi_range(-5, 4))) - Original.to_godot(Vector2.ZERO))
+		MechView.play_effect(node, true)
+	if not _leeches.has(victim.id):
+		_leeches[victim.id] = []
+	(_leeches[victim.id] as Array).append({"attacker": attacker, "time": LEECH_TIME, "node": node})
+
+## Takes the bombs off a mech: all of them, or the first only.
+func _drop_leech(victim_id: int, all := true) -> Array:
+	var list: Array = _leeches.get(victim_id, [])
+	var gone: Array = list.duplicate() if all else list.slice(0, 1)
+	for e: Dictionary in gone:
+		list.erase(e)
+		if e.get("node") and is_instance_valid(e["node"]):
+			(e["node"] as Node3D).queue_free()
+	if list.is_empty():
+		_leeches.erase(victim_id)
+	return gone
+
+## The owner's call: explode (damage landed: every bomb; time up: the first) or defuse (a
+## teammate's shot: every bomb).
+func _leech_release(victim: Mech, explode: bool, all := true) -> void:
+	if not _leeches.has(victim.id):
+		return
+	_leech_burst(victim.id, explode, all)
+	if _networked():
+		_net_leech_burst.rpc(victim.id, explode, all)
+
+@rpc("any_peer", "call_remote", "reliable")
+func _net_leech_burst(victim_id: int, explode: bool, all: bool) -> void:
+	_leech_burst(victim_id, explode, all)
+
+## Every machine shows it; each hurts only the mechs it owns (no team check).
+func _leech_burst(victim_id: int, explode: bool, all: bool) -> void:
+	var gone := _drop_leech(victim_id, all)
+	if gone.is_empty() or not mechs.has(victim_id):
+		return
+	var at := (mechs[victim_id] as Mech).sim.pos
+	for e: Dictionary in gone:
+		BattleWorld.hit_flash(self, at, LEECH_BLAST if explode else LEECH_DEFUSED)
+		if not explode:
+			continue
+		for m: Mech in mechs.values():
+			if not _owns(m):
+				continue
+			var amount := Combat.splash_falloff(LEECH_DAMAGE, LEECH_RADIUS, m.sim.pos.distance_to(at))
+			_special_hit(m, int(e["attacker"]), int(amount * m.sim.damage_taken_mul()), 52)
+
+func _step_leeches(dt: float) -> void:
+	for id in _leeches.keys():
+		if not mechs.has(id):
+			_drop_leech(id)
+			continue
+		for e: Dictionary in _leeches[id]:
+			e["time"] -= dt
+		var first: Dictionary = (_leeches[id] as Array)[0]
+		if first["time"] <= 0.0 and _owns(mechs[id]):
+			_leech_release(mechs[id], true, false)
+
+# Plasma Wire -----------------------------------------------------------------------------
+
+func _add_tether(attacker: int, victim: int) -> void:
+	var node := MeshInstance3D.new()
+	var mat := StandardMaterial3D.new()
+	mat.albedo_texture = load(CHAIN_TEXTURE) if ResourceLoader.exists(CHAIN_TEXTURE) else null
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mat.texture_repeat = true
+	node.material_override = mat
+	node.mesh = ImmediateMesh.new()
+	add_child(node)
+	_tethers.append({"attacker": attacker, "victim": victim, "time": TETHER_TIME, "length": 0.0, "node": node})
+
+## The pull is the owner's to apply to its own mech, before it moves this tick.
+func _step_tethers(dt: float) -> void:
+	for m: Mech in mechs.values():
+		m.sim.pull_velocity = Vector2.ZERO
+	for i in range(_tethers.size() - 1, -1, -1):
+		var t: Dictionary = _tethers[i]
+		t["time"] -= dt
+		var a: Mech = mechs.get(t["attacker"])
+		var v: Mech = mechs.get(t["victim"])
+		if t["time"] <= 0.0 or a == null or v == null or a.sim.life <= 0 or v.sim.life <= 0:
+			(t["node"] as Node3D).queue_free()
+			_tethers.remove_at(i)
+			continue
+		var d := v.sim.pos - a.sim.pos
+		var dist := d.length()
+		t["length"] = minf(dist, float(t["length"]) + CHAIN_GROW * dt)
+		if dist > TETHER_SLACK:
+			if _owns(v):
+				v.sim.pull_velocity += -d / dist * TETHER_VICTIM_PULL * dist
+			if _owns(a):
+				a.sim.pull_velocity += d / dist * TETHER_ATTACKER_PULL * dist
+
+func _draw_tethers() -> void:
+	for t: Dictionary in _tethers:
+		var a: Mech = mechs.get(t["attacker"])
+		var v: Mech = mechs.get(t["victim"])
+		var mesh := (t["node"] as MeshInstance3D).mesh as ImmediateMesh
+		mesh.clear_surfaces()
+		if a == null or v == null:
+			continue
+		var d := v.sim.pos - a.sim.pos
+		if d.length() < 1.0 or float(t["length"]) < 1.0:
+			continue
+		var along := d.normalized()
+		var side := Vector2(-along.y, along.x) * CHAIN_WIDTH * 0.5
+		var p0 := a.sim.pos
+		var p1 := a.sim.pos + along * float(t["length"])
+		var tiles := float(t["length"]) / CHAIN_TILE
+		mesh.surface_begin(Mesh.PRIMITIVE_TRIANGLE_STRIP)
+		for e in [[p0 - side, 0.0, 0.0], [p0 + side, 1.0, 0.0], [p1 - side, 0.0, tiles], [p1 + side, 1.0, tiles]]:
+			mesh.surface_set_uv(Vector2(e[1], e[2]))
+			mesh.surface_add_vertex(Original.to_godot(e[0]))
+		mesh.surface_end()
+
+# Teleport Beam ---------------------------------------------------------------------------
+
+## RG_TELEPORT_ACK: the shooter to where the beam is, stopped, fading back in.
+func _teleport(m: Mech, to: Vector2) -> void:
+	m.sim.teleport_to(to)
+	_fading[m.id] = 0.0
+	if _networked() and m.local:
+		_net_teleport.rpc(to)
+
+@rpc("any_peer", "call_remote", "reliable")
+func _net_teleport(to: Vector2) -> void:
+	var id := multiplayer.get_remote_sender_id()
+	if mechs.has(id):
+		var m: Mech = mechs[id]
+		m.sim.real_pos = to
+		m.sim.pos = to
+		_fading[id] = 0.0
+
+# Split shots and links -------------------------------------------------------------------
+
+## rc_bullet::create_child (MP7-C3, PTL Type 1): when the round's time runs out it breaks into
+## create_child rounds of child_id, fanned over degree_to_emit_child from -half, or spaced
+## 360 / n from the heading when that is 0. Each chases the nearest enemy of the shooter within
+## the child's detecting_area of the burst, if the child homes. Every machine makes them.
+func _spawn_children(b: Bullet) -> void:
+	var shooter_id: int = b.get_meta("shooter")
+	var shooter: Mech = mechs.get(shooter_id)
+	if shooter == null:
+		return
+	var child := GameData.weapon(int(b.weapon.mode_num("child_id")))
+	var n := b.child_count()
+	var spread := b.weapon.mode_num("degree_to_emit_child")
+	var heading := float(Original.deg_from_vec2(b.dir.x, b.dir.y))
+	var chase: MechSim = null
+	var best := child.mode_num("detecting_area")
+	for m: Mech in mechs.values():
+		if m.id == shooter_id or m.sim.life <= 0 or Room.teammates(m.team, shooter.team):
+			continue
+		var d := m.sim.pos.distance_to(b.plane_pos)
+		if d <= best:
+			best = d
+			chase = m.sim
+	for k in n:
+		var deg := heading + k * 360.0 / n
+		if spread > 0.0:
+			deg = heading - spread / 2.0 + (k * spread / (n - 1) if n > 1 else spread / 2.0)
+		var c := Bullet.new()
+		add_child(c)
+		c.setup(b.plane_pos, (int(roundf(deg)) % 360 + 360) % 360, shooter.sim, child, chase)
+		c.set_meta("shooter", shooter_id)
+		bullets.append(c)
+
+## World::process_link_hit (Fragment Cannon): after a hit on a mech (hit) or a wall at at, one
+## more round 30 units on toward the hit mech's nearest teammate within linked_hit_distance
+## (not the shooter), else the mech nearest it; after a wall, the shooter's nearest enemy
+## within that distance, else anyone nearest; else a random way. No network message.
+func _link(b: Bullet, at: Vector2, hit: Mech) -> void:
+	if b.links_left <= 0 and b.linked:
+		return
+	var shooter_id: int = b.get_meta("shooter")
+	var reach := b.weapon.param_num("linked_hit_distance")
+	var from := hit.sim.pos if hit else at
+	var aim: Mech = null
+	var near := INF
+	for m: Mech in mechs.values():
+		if m == hit or m.sim.life <= 0:
+			continue
+		var d := m.sim.pos.distance_to(from)
+		var wanted := (Room.teammates(m.team, hit.team) and m.id != shooter_id) if hit else (m.id != shooter_id and not Room.teammates(m.team, _team_of_id(shooter_id)))
+		if wanted and d <= reach and d < near:
+			near = d
+			aim = m
+	if aim == null:
+		near = INF
+		for m: Mech in mechs.values():
+			if m == hit or m.sim.life <= 0:
+				continue
+			var d := m.sim.pos.distance_to(from)
+			if d < near:
+				near = d
+				aim = m
+	var dir := (aim.sim.pos - at).normalized() if aim and aim.sim.pos.distance_to(at) > 0.01 else Original.vec2_from_deg(randi() % 360)
+	var link := Bullet.new()
+	add_child(link)
+	link.setup(at + dir * LINK_OFFSET, Original.deg_from_vec2(dir.x, dir.y), b.owner_sim, b.weapon)
+	link.speed = LINK_SPEED
+	link.power = b.weapon.damage - LINK_DAMAGE_CUT
+	link.linked = true
+	link.links_left = (b.links_left if b.linked else int(b.weapon.param_num("linked_hit_num"))) - 1
+	link.set_meta("shooter", shooter_id)
+	bullets.append(link)
 
 ## An X-Mine looking for a target from where it lies.
 func _mine_target(owner_id: int, at: Vector2, detect_range: float) -> MechSim:
@@ -2041,7 +2457,10 @@ func _explode(b: Bullet, at: Vector2, direct: Mech = null) -> void:
 		else:
 			amount = Combat.splash_falloff(splash, radius, d)
 		if amount > 0 or (jams and d <= radius):
-			_apply_hit(m, shooter, amount, b.weapon_id)
+			# The Napalm Thrower's burn starts on the direct hit, guarded or not: the SPLASH
+			# branch runs before the guard test (world.cpp 2098).
+			if _apply_hit(m, shooter, amount, b.weapon_id) and m == direct and b.weapon_id == 44:
+				_state_change(m, 44, amount, shooter)
 	if direct and _owns(direct) and round_active and b.weapon.state_action_type == 4:
 		_state_change(direct, b.weapon_id, maxi(1, in_radius))
 
@@ -2052,7 +2471,13 @@ func _detonate_shells(shooter: int) -> bool:
 		var b := bullets[i]
 		if int(b.get_meta("shooter")) != shooter or not b.detonates_on_release():
 			continue
-		_explode(b, b.plane_pos)
+		if b.weapon_id == 49:
+			# The Teleport Beam: its shooter's machine moves it there (_step_bullets).
+			BattleWorld.hit_flash(self, b.plane_pos, b.boom_scene())
+			if mechs.has(shooter) and (mechs[shooter] as Mech).local:
+				_teleport(mechs[shooter], b.plane_pos)
+		else:
+			_explode(b, b.plane_pos)
 		b.queue_free()
 		bullets.remove_at(i)
 		any = true
@@ -2060,19 +2485,32 @@ func _detonate_shells(shooter: int) -> bool:
 
 ## Every screen flies every bullet. Damage is decided by whoever owns the mech that was hit:
 ## the local player for their own mech, this machine for the practice dummy. Other screens
-## only show the impact and wait for the victim's report.
+## only show the impact and wait for the victim's report. Split rounds, links and the teleport
+## run on every screen from the same flight; the teleport is the shooter's machine's call.
 func _step_bullets(dt: float) -> void:
 	for i in range(bullets.size() - 1, -1, -1):
 		var b := bullets[i]
 		var prev := b.plane_pos
-		var alive := b.advance(dt)
 		var shooter: int = b.get_meta("shooter")
+		var shooter_team := _team_of_id(shooter)
+		# auto_explosion (PTL Type 1): an enemy within the area cuts the time short.
+		if b.weapon.mode.get("auto_explosion", false) == true:
+			var near := false
+			for m: Mech in mechs.values():
+				if m.id != shooter and m.sim.life > 0 and not Room.teammates(m.team, shooter_team) \
+						and m.sim.pos.distance_to(b.plane_pos) <= b.weapon.mode_num("auto_explosion_area"):
+					near = true
+			b.proximity_fuse(near)
+		var alive := b.advance(dt)
 		# A missile or splash shell that runs out explodes (explosion(true)); only splash hurts.
+		# A round with create_child breaks into its children then.
 		if not alive:
 			if b.weapon.is_splash():
 				_explode(b, b.plane_pos)
-			elif b.guided > 0:
+			elif b.guided > 0 or b.child_count() > 0:
 				BattleWorld.hit_flash(self, b.plane_pos, b.boom_scene())
+			if b.child_count() > 0:
+				_spawn_children(b)
 		# World::update: a bullet that meets a wall stops there (rc_map::is_crashed_with_object)
 		# with explosion(crashed_pos), which only shows the effect. The Cluster Cannon (11)
 		# alone calls explosion(), the splash, where the shell is.
@@ -2084,10 +2522,22 @@ func _step_bullets(dt: float) -> void:
 					_explode(b, b.plane_pos)
 				else:
 					BattleWorld.hit_flash(self, wall, b.boom_scene())
+				if b.weapon.param.get("linked_hit", false) == true:
+					_link(b, wall, null)
 		for m: Mech in mechs.values():
 			if not alive:
 				break
-			if m.id == shooter or m.sim.life <= 0 or m.sim.is_pulse() or Room.teammates(m.team, _team_of_id(shooter)):
+			if m.sim.life <= 0 or m.sim.is_pulse():
+				continue
+			# Only the Fragment Cannon can hit its own shooter, 0.2 s into the flight.
+			var own := m.id == shooter
+			if own and not (b.weapon_id == 39 and b.age >= SELF_HIT_AGE):
+				continue
+			var mate := not own and Room.teammates(m.team, shooter_team)
+			if mate and not b.linked:
+				# A teammate's shot through a mech carrying a leech bomb defuses it.
+				if _owns(m) and _leeches.has(m.id) and b.hits(m.sim.pos, m.sim.crash_radius):
+					_leech_release(m, false)
 				continue
 			if not b.hits(m.sim.pos, m.sim.crash_radius):
 				continue
@@ -2096,16 +2546,36 @@ func _step_bullets(dt: float) -> void:
 				_explode(b, b.plane_pos, m)
 				continue
 			BattleWorld.hit_flash(self, b.plane_pos, b.boom_scene())
+			if b.weapon.param.get("linked_hit", false) == true:
+				_link(b, b.plane_pos, m)
+			# A link on a teammate, or the cannon on its shooter: taken up, nothing lands.
+			if own or mate:
+				continue
+			# The Teleport Beam does no damage.
+			if b.power <= 0 and b.weapon.state_action_type == 0:
+				continue
 			# World::state_change on the victim's machine, only for a hit no guard stopped:
-			# the Plasma Bow stuns and pushes, the Confusing Beam confuses.
+			# the Plasma Bow stuns and pushes, the Confusing Beam confuses, and so on.
 			if _apply_hit(m, shooter, b.power, b.weapon_id, b.prev_pos):
 				if b.weapon.state_action_type == 3:
 					_stun(m, b.charge, b.dir)
 				elif b.weapon.state_action_type in [5, 9]:
-					_state_change(m, b.weapon_id)
+					_state_change(m, b.weapon_id, 1, shooter)
 				elif b.weapon.state_action_type == 6:
 					# Viper Smart Gun: the hit's charge level rides in the count.
-					_state_change(m, b.weapon_id, b.charge)
+					_state_change(m, b.weapon_id, b.charge, shooter)
+				elif b.weapon_id in HIT_STATES:
+					_state_change(m, b.weapon_id, 1, shooter)
+		# Teleport Beam: the shooter goes where the beam is when it ends, or as soon as the
+		# button is not held (rcAmmo.cpp: every frame the owner is not holding it).
+		if b.weapon_id == 49 and mechs.has(shooter) and (mechs[shooter] as Mech).local:
+			if alive and not _prev_fire_local:
+				alive = false
+				BattleWorld.hit_flash(self, b.plane_pos, b.boom_scene())
+				if _networked():
+					_net_detonate.rpc()
+			if not alive:
+				_teleport(mechs[shooter], b.plane_pos)
 		# Other screens do not draw a mine lying in wait (no is_stealth model); its owner does.
 		if alive and b.mine:
 			b.visible = not b.is_lying() or (mechs.has(shooter) and _owns(mechs[shooter]))
@@ -2264,6 +2734,9 @@ func _autopilot_intent(m: Mech) -> MechSim.Intent:
 	elif w.is_sword() and w.crash_radius <= 0.0:
 		# Void Pulse hits nothing; use it once an enemy is close.
 		reach = 200.0
+	elif reach <= 0.0:
+		# Self-use specials (D Fielder, Over Booster): use them once an enemy is close.
+		reach = 300.0
 	elif not w.is_sword() and not w.is_immediate() and w.lockon_range() <= 0.0:
 		# Straight shots: stay close enough to keep both mechs in the original camera's view.
 		reach = minf(reach, 260.0)

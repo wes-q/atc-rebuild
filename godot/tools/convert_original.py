@@ -551,6 +551,13 @@ GUARD_FILES = {
 # World::receive_guard: a blocked hit, and the shield breaking. World::state_change: the
 # Impact Pulse-Gun's AddDamageState mark.
 GUARD_EFFECTS = ("weapon/character_block.X", "weapon/shield_crash.X", "weapon01/defence_down.X")
+# The step 17 weapons' state effects, named only in world.cpp's state_change and
+# rcPlayerState.cpp: the burn, drain, booster, defence field, reverse, freeze and blind marks,
+# the leech bomb's blast and its defusing.
+STATE_EFFECTS = ("weapon01/fire_burn.X", "weapon01/drain_target_effect.X", "weapon01/booster_rgn_down.X",
+                 "weapon01/D_Shield.X", "weapon01/reverse.X", "weapon01/freezed.x", "weapon01/blind_01.X",
+                 "weapon01/Leech_Bomb.X", "weapon/third_gigas_boom.x", "weapon/yokyuk_explo.x",
+                 "weapon01/busterup.X")
 # weapon_parameter.lua field prefixes, by body.
 WEAPON_FIELD_PREFIX = {"zeid": "zeid", "redkite": "redkite", "gigas": "gigas", "deff": "deff", "alicia": "alicia"}
 WEAPON_EFFECT_FIELDS = ("bullet_xfile", "bullet_xfile2", "bullet_xfile3", "bullet_start_xfile", "bullet_dead_xfile",
@@ -607,6 +614,7 @@ def convert_bodies(data_dir: pathlib.Path, out_dir: pathlib.Path) -> None:
     for files in GUARD_FILES.values():
         wanted.update(files)
     wanted.update(GUARD_EFFECTS)
+    wanted.update(STATE_EFFECTS)
     # The sword command combos' flashes (combo_parameter.lua).
     for combo in params.get("combo_parameter", []):
         for field in ("effect_name", "rotate_effect_name"):

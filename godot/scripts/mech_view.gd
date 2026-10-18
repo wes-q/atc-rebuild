@@ -196,31 +196,39 @@ func is_drawing() -> bool:
 ## an alpha-blended copy of its material (the compatibility renderer ignores per-instance
 ## transparency); the previous override, a colour scheme or none, comes back after.
 const GHOST_ALPHA := 150.0 / 255.0
-var _ghost := false
-var _ghost_saved: Array = [] ## [mesh, surface, previous override]
+var _alpha := 1.0
+var _faded: Array = [] ## [mesh, surface, previous override, faded copy, its own alpha]
 func set_ghost(on: bool) -> void:
-	if on == _ghost:
+	set_alpha(GHOST_ALPHA if on else 1.0)
+
+## The whole model drawn at this alpha (1 for solid): PulseState's see-through and the
+## Teleport Beam's fade-in (is_teleport, alpha 0 to 255 at 120 a second).
+func set_alpha(a: float) -> void:
+	a = clampf(a, 0.0, 1.0)
+	if is_equal_approx(a, _alpha):
 		return
-	_ghost = on
-	if not on:
-		for e in _ghost_saved:
+	_alpha = a
+	if a >= 1.0:
+		for e in _faded:
 			(e[0] as MeshInstance3D).set_surface_override_material(e[1], e[2])
-		_ghost_saved.clear()
+		_faded.clear()
 		return
-	for n in model.find_children("*", "MeshInstance3D", true, false):
-		var mi := n as MeshInstance3D
-		if mi.mesh == null:
-			continue
-		for i in mi.mesh.get_surface_count():
-			var current := mi.get_surface_override_material(i)
-			var base := current if current else mi.mesh.surface_get_material(i)
-			if not base is BaseMaterial3D:
+	if _faded.is_empty():
+		for n in model.find_children("*", "MeshInstance3D", true, false):
+			var mi := n as MeshInstance3D
+			if mi.mesh == null:
 				continue
-			_ghost_saved.append([mi, i, current])
-			var faded := base.duplicate() as BaseMaterial3D
-			faded.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-			faded.albedo_color.a *= GHOST_ALPHA
-			mi.set_surface_override_material(i, faded)
+			for i in mi.mesh.get_surface_count():
+				var current := mi.get_surface_override_material(i)
+				var base := current if current else mi.mesh.surface_get_material(i)
+				if not base is BaseMaterial3D:
+					continue
+				var faded := base.duplicate() as BaseMaterial3D
+				faded.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+				_faded.append([mi, i, current, faded, faded.albedo_color.a])
+				mi.set_surface_override_material(i, faded)
+	for e in _faded:
+		(e[3] as BaseMaterial3D).albedo_color.a = float(e[4]) * a
 
 ## rcPlayer::guard: the take-out clip, held on its last frame while guarding (movement
 ## clips are skipped), the SHLD particles for an energy shield or the shield model for a

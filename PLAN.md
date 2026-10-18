@@ -46,6 +46,7 @@ What the archive contains: `docs/archive-inventory.md`.
 | 14 | The original room list and game room, with LAN discovery | Done |
 | 15 | The original shop page as the garage | Done |
 | 16 | Internet play: send rate by player count, a host override, the Tailscale guide | Done |
+| 17 | The last 15 weapons: split and linked shots, burns, drains, the leech bomb, teleport, freeze, blind, the plasma wire | Done |
 
 ## Step 16 plan: internet play (agreed with Wes)
 

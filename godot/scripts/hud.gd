@@ -46,6 +46,15 @@ var show_board := false
 var _board_w := {} ## slot -> shown bar width
 ## Radar::hide_time: an EMP hit blanks the enemy blips, edge markers and lock-on marks.
 var jam_time := 0.0
+## BlindBeamState on your mech (Radar::render): blind_eff.png over the whole 800x600 screen,
+## under the HUD panels, the radar's player dots hidden (radar.cpp 285, 476, 1152). Names
+## were drawn just before it, under it; here they are left out while it lasts (inferred).
+var blind := false:
+	set(v):
+		blind = v
+		if _blind:
+			_blind.visible = v
+var _blind: TextureRect
 var _gauge_w := {} ## bar name -> shown width, easing to the target
 var overlay: Node2D
 
@@ -88,6 +97,14 @@ func _ready() -> void:
 	add_child(screen)
 	if OriginalUI.available():
 		_build_original()
+		_blind = TextureRect.new()
+		_blind.texture = OriginalUI.texture("ui2/game_fight/blind_eff.png")
+		_blind.size = SCREEN
+		_blind.stretch_mode = TextureRect.STRETCH_SCALE
+		_blind.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		_blind.visible = false
+		screen.add_child(_blind)
+		screen.move_child(_blind, 0)
 	overlay = Node2D.new()
 	overlay.draw.connect(_draw_overlay)
 	screen.add_child(overlay)
@@ -433,10 +450,12 @@ func _draw_overlay() -> void:
 		var rel := Vector2(t.pos.x - _me.x, -(t.pos.y - _me.y)) * RADAR_SCALE
 		var dot := red_dot if t.team == Room.RED else ours
 		var color := Room.team_color(t.team)
-		if jam_time <= 0.0 and absf(rel.x) <= RADAR_HALF.x and absf(rel.y) <= RADAR_HALF.y and dot:
+		if jam_time <= 0.0 and not blind and absf(rel.x) <= RADAR_HALF.x and absf(rel.y) <= RADAR_HALF.y and dot:
 			overlay.draw_texture_rect(dot, Rect2(RADAR_POS + rel, Vector2(5, 5)), false)
 		var on_screen := _to_screen(t.pos)
 		var inside := on_screen.x >= 0 and on_screen.x <= SCREEN.x and on_screen.y >= 0 and on_screen.y <= SCREEN.y
+		if blind:
+			continue
 		if inside:
 			# Name 105 x 0.3 + 5 units up the plane, drawn 40 pixels left of that point.
 			var at := _to_screen(t.pos, 105.0 * Original.SCALE + 5.0) + Vector2(-40, 0)

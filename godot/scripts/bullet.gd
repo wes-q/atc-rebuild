@@ -36,13 +36,20 @@ var _delay_left := 0.0
 var _chasing := false
 ## Finds a mine's target: (mine position, range) -> MechSim or null. Set by the game.
 var find_target: Callable
+## Seconds this bullet has flown (the Fragment Cannon hits its own shooter only after 0.2).
+var age := 0.0
+## World::process_link_hit (the Fragment Cannon, linked_hit): links still to come after this
+## one, and whether this is a link (links skip the team check).
+var links_left := 0
+var linked := false
 
 func setup(origin: Vector2, deg: int, shooter: MechSim, w: GameData.Weapon, chase: MechSim = null, charge_level := 0) -> void:
 	plane_pos = origin
 	prev_pos = origin
 	dir = Original.vec2_from_deg(deg)
 	weapon = w
-	speed = w.bullet_speed
+	# rc_bullet::init: v = vel + vel x charge_num x charge_add_damage, for every charge weapon.
+	speed = w.bullet_speed * (1.0 + maxi(0, charge_level) * w.param_num("charge_add_damage"))
 	life = w.life
 	radius = w.crash_radius
 	weapon_id = w.id
@@ -73,6 +80,7 @@ func setup(origin: Vector2, deg: int, shooter: MechSim, w: GameData.Weapon, chas
 func advance(dt: float) -> bool:
 	prev_pos = plane_pos
 	life -= dt
+	age += dt
 	if mine:
 		_advance_mine(dt)
 		_orient()
@@ -130,8 +138,11 @@ func _steer() -> void:
 	var t := maxf(0.05, dir.dot(want) * float(guided) / 255.0)
 	dir = dir.slerp(want, minf(t, 1.0)).normalized()
 
-## rc_bullet::is_crash, NORMAL type: distance from the mech to this frame's path.
+## rc_bullet::is_crash, NORMAL type: distance from the mech to this frame's path. A weapon
+## with no collision_type (the Void Pulse, D Fielder and Over Booster objects) never hits.
 func hits(at: Vector2, mech_radius: float) -> bool:
+	if weapon.collision_type == 0:
+		return false
 	var closest := Geometry2D.get_closest_point_to_segment(at, prev_pos, plane_pos)
 	return closest.distance_to(at) <= mech_radius + radius
 
@@ -151,6 +162,15 @@ func _orient() -> void:
 func boom_scene() -> String:
 	var key := "bullet_dead_xfile" if charge == 0 else "bullet_dead_xfile%d" % (charge + 2)
 	return Bodies.scene_path(str(weapon.mode.get(key, weapon.mode.get("bullet_dead_xfile", ""))))
+
+## create_child (the MP7-C3, the PTL Type 1): rounds it breaks into when its time runs out.
+func child_count() -> int:
+	return int(weapon.mode_num("create_child")) if int(weapon.mode_num("child_id")) > 0 else 0
+
+## auto_explosion (the PTL Type 1): an enemy within auto_explosion_area cuts the life short.
+func proximity_fuse(enemy_near: bool) -> void:
+	if enemy_near and weapon.mode.get("auto_explosion", false) == true:
+		life = minf(life, weapon.mode_num("auto_explosion_delay"))
 
 ## button_up_explosion: the owner can set it off by letting go of the button.
 func detonates_on_release() -> bool:

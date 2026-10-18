@@ -93,8 +93,10 @@ class Weapon:
 		var v: Variant = param.get(key, fallback)
 		return float(v) if v is float or v is int else fallback
 
+## copy_weapon_data_to_net's (BYTE) cast: it wraps rather than clamps, so 300 becomes 44
+## (the D Fielder's life_time 30000) and 663 becomes 151 (the Claw Type 1's re_load_time).
 static func _byte(v: float) -> int:
-	return clampi(int(v), 0, 255)
+	return int(v) & 0xFF
 
 static func _num(v: Variant) -> float:
 	return 0.0 if v == null else float(v)

@@ -217,6 +217,38 @@ const DAMAGE_STACK_TIME := 10.0
 const DAMAGE_STACK_CAP := 2.5
 var damage_stacks: Array[float] = []
 
+# The step 17 states (World::state_change, picked by weapon id; rcPlayerState.cpp). The
+# client hard-codes their times; the database's state_limit_time is never read.
+## Freezing Beam Gun: FreezeState (every input dropped, one stop sent), CantAttackState and
+## NoDamageState (no damage and no new states), all 10 s. An ice block, not a slow.
+const FREEZE_TIME := 10.0
+var freeze_time := 0.0
+## R.Control Beam: ReverseControlState, the movement keys swapped, 10 s.
+const REVERSE_TIME := 10.0
+var reverse_time := 0.0
+## Blind Beam: BlindBeamState, 10 s; the HUD covers the screen and hides the radar's blips.
+const BLIND_TIME := 10.0
+var blind_time := 0.0
+## D Fielder: DefenseFieldGeneratorState, damage taken x 0.7 (defensefield_ratio), 10 s.
+const FIELD_TIME := 10.0
+const FIELD_RATIO := 0.7
+var field_time := 0.0
+## Power Up Pulse: PowerDownPulseState, 10 s: booster recovery x booster_recovery (1.5),
+## booster use, weapon energy and energy drained by others x booster_reduce (0.7).
+const POWER_TIME := 10.0
+var power_time := 0.0
+var power_recovery := 1.0
+var power_reduce := 1.0
+## Plasma Wire: GravityState, 15 s: the third weapon is barred (cant_attack3). The tether's
+## pull is the game's to set each tick: pull_velocity, added to the move.
+const GRAVITY_TIME := 15.0
+var gravity_time := 0.0
+var pull_velocity := Vector2.ZERO
+## Over Booster: OverBoosterState, 10 s from the attack: a boost runs at vel_limit at once,
+## with no ramp (rcPlayer.cpp; overbooster_ratio is commented out).
+const OVER_BOOST_TIME := 10.0
+var over_boost_time := 0.0
+
 ## body_name: RobotInfo name. weapon_slot: the slot selected at the start. weapons: the four
 ## equipped weapon ids in slot order (sword, gun, heavy, special), or empty for the body's
 ## defaults.
@@ -266,9 +298,23 @@ func step(intent: Intent, dt: float) -> void:
 	if _update_dead(dt):
 		return
 	previous_pos = pos
-	# StunState: every input is dropped, turning and firing included.
-	if stun_time > 0.0:
-		stun_time -= dt
+	# ReverseControlState: left and right, up and down swap (rcManager.cpp updatemove); aim
+	# and fire are untouched.
+	if reverse_time > 0.0:
+		var swapped := Intent.new()
+		swapped.left = intent.right
+		swapped.right = intent.left
+		swapped.up = intent.down
+		swapped.down = intent.up
+		swapped.boost = intent.boost
+		swapped.fire = intent.fire
+		swapped.weapon_key = intent.weapon_key
+		swapped.guard = intent.guard
+		swapped.aim = intent.aim
+		intent = swapped
+	# StunState and FreezeState: every input is dropped, turning and firing included.
+	if stun_time > 0.0 or freeze_time > 0.0:
+		stun_time = maxf(0.0, stun_time - dt)
 		var held := Intent.new()
 		held.aim = pos + Original.vec2_from_deg(facing) * 100.0
 		intent = held
@@ -311,7 +357,7 @@ func _update_dead(dt: float) -> bool:
 ## at half rate below the low line. An empty gauge drops a boost back to walking.
 func _update_booster_gauge(intent: Intent, dt: float) -> void:
 	if intent.boost:
-		booster_gage -= energy_reduce * dt
+		booster_gage -= energy_reduce * power_reduce * dt
 		if booster_gage <= 0.0:
 			booster_gage = 0.0
 			booster_warning_time = 1.5
@@ -319,6 +365,7 @@ func _update_booster_gauge(intent: Intent, dt: float) -> void:
 				_send_move(_deg(intent), 1)
 	else:
 		var rate := regenerate if booster_gage > energy_low_line else regenerate * 0.5
+		rate *= power_recovery
 		booster_gage = minf(energy_max, booster_gage + rate * dt)
 
 ## rcPlayerManager::updatemove: turns key and button edges into move protocol messages.
@@ -437,9 +484,11 @@ func _update_physics(dt: float) -> void:
 	elif booster_init_time != 0.0:
 		booster_init_time += dt
 		player_vel -= add_vel
+	if over_boost_time > 0.0 and acc_flag:
+		player_vel = vel_limit
 	player_vel = minf(player_vel, vel_limit) * move_mul
 	_last_vel = player_vel
-	pos += move_dir * player_vel * dt
+	pos += move_dir * player_vel * dt + pull_velocity * dt
 	if _settling:
 		pos += (_dash_target - pos) * Original.DASH_EASE
 
@@ -547,9 +596,54 @@ func confuse(w: GameData.Weapon) -> void:
 func is_confused() -> bool:
 	return confusion_time > 0.0
 
-## adddamage_ratio: damage taken is multiplied by this.
+## adddamage_ratio, then defensefield_ratio: damage taken is multiplied by this.
 func damage_taken_mul() -> float:
-	return 1.0 + 0.1 * damage_stacks.size()
+	return (1.0 + 0.1 * damage_stacks.size()) * (FIELD_RATIO if field_time > 0.0 else 1.0)
+
+## NoDamageState: no damage lands and no new state starts.
+func is_nodamage() -> bool:
+	return freeze_time > 0.0
+
+## Starts a step 17 state on this mech (every machine runs them). w: the weapon that caused
+## it, for its parameters. A frozen mech takes no new state.
+func start_state(w: GameData.Weapon) -> void:
+	if is_nodamage():
+		return
+	match w.id:
+		51:
+			freeze_time = FREEZE_TIME
+			_send_move(0, 0)
+			_burst_left = 0
+			streaming = false
+		50:
+			reverse_time = REVERSE_TIME
+		55:
+			blind_time = BLIND_TIME
+		48:
+			field_time = FIELD_TIME
+		47:
+			power_time = POWER_TIME
+			power_recovery = w.param_num("booster_recovery", 1.0)
+			power_reduce = w.param_num("booster_reduce", 1.0)
+		57:
+			gravity_time = GRAVITY_TIME
+			# A mech holding its third weapon is put on the second.
+			if weapon_index == 2:
+				weapon_index = 1
+				weapon_changed.emit(1)
+
+## RG_TELEPORT_ACK (Teleport Beam): straight to the point, stopped, the boost dropped.
+func teleport_to(at: Vector2) -> void:
+	_send_move(0, 0)
+	add_vel = 0.0
+	dashing = false
+	_settling = false
+	pos = at
+	real_pos = at
+	previous_pos = at
+
+func is_frozen() -> bool:
+	return freeze_time > 0.0
 
 ## AddDamageState::init: a new stack only below the cap. True if it was added.
 func add_damage_stack() -> bool:
@@ -563,6 +657,18 @@ func is_pulse() -> bool:
 
 func _update_states(dt: float) -> void:
 	pulse_time = maxf(0.0, pulse_time - dt)
+	freeze_time = maxf(0.0, freeze_time - dt)
+	over_boost_time = maxf(0.0, over_boost_time - dt)
+	reverse_time = maxf(0.0, reverse_time - dt)
+	blind_time = maxf(0.0, blind_time - dt)
+	field_time = maxf(0.0, field_time - dt)
+	gravity_time = maxf(0.0, gravity_time - dt)
+	if power_time > 0.0:
+		power_time -= dt
+		if power_time <= 0.0:
+			power_time = 0.0
+			power_recovery = 1.0
+			power_reduce = 1.0
 	for i in range(damage_stacks.size() - 1, -1, -1):
 		damage_stacks[i] -= dt
 		if damage_stacks[i] <= 0.0:
@@ -665,6 +771,8 @@ func _update_weapon_switch(intent: Intent) -> void:
 	var slot := key - 1
 	if slot < 0 or slot >= slots.size():
 		return
+	if slot == 2 and gravity_time > 0.0:
+		return
 	# A weapon key while guarding drops the guard first (WEAPON_GUARD_CANCEL).
 	if guarding:
 		guard_cancel()
@@ -707,6 +815,9 @@ func _update_weapons(intent: Intent, dt: float) -> void:
 			attacking = false
 	if charging:
 		_charge_time += dt
+		# charge_energy_reduce: the booster drains while the charge is below its top.
+		if charge_level < int(slot.data.param_num("charge_num")):
+			booster_gage = maxf(0.0, booster_gage - slot.data.param_num("charge_energy_reduce") * power_reduce * dt)
 		var level := mini(int(slot.data.param_num("charge_num")), int(_charge_time / maxf(slot.data.param_num("charge_gap", 1.5), 0.01)))
 		if level != charge_level:
 			charge_level = level
@@ -795,10 +906,16 @@ func _start_burst(slot: Slot) -> void:
 		slot.recharge = 0.0
 	attacking = true
 	_attack_time = slot.attack_time
-	# shoot() limits the burst to the ammo left.
-	_burst_left = slot.data.fire_num if slot.ammo < 0 else mini(slot.data.fire_num, slot.ammo)
+	# shoot() limits the burst to the ammo left; charge_repeat_shot adds a round per charge
+	# level (the CP.Pulse Cannon: 1 + level).
+	var count := slot.data.fire_num + maxi(0, charge_level) * int(slot.data.param_num("charge_repeat_shot"))
+	_burst_left = count if slot.ammo < 0 else mini(count, slot.ammo)
 	_burst_left = maxi(_burst_left, 1)
+	# Each queued bullet waits continuous_time; use_bullet_start_time sets the first one's
+	# own wait (bullet_start_time, 0 for the MP7-C3, the H.P Beam Rifle and the Viper).
 	_burst_timer = slot.data.fire_interval + fire_delay
+	if int(slot.data.mode_num("use_bullet_start_time")) == 1:
+		_burst_timer = slot.data.mode_num("bullet_start_time") + fire_delay
 	attack_started.emit(weapon_index)
 
 ## One round: ammo, the gauge, and the event. False when the ammo has run out.
@@ -821,7 +938,7 @@ func _swing(slot: Slot) -> void:
 
 ## booster_gage -= cost_energy for each bullet or swing, floored at 0.
 func _spend(amount: float) -> void:
-	booster_gage = maxf(0.0, booster_gage - amount)
+	booster_gage = maxf(0.0, booster_gage - amount * power_reduce)
 
 func _is_moving() -> bool:
 	return vel_scalar > 0.0 or move_dir != Vector2.ZERO
@@ -935,6 +1052,16 @@ func reset_at(spawn: Vector2, face: int) -> void:
 	_clear_confusion()
 	pulse_time = 0.0
 	damage_stacks.clear()
+	freeze_time = 0.0
+	reverse_time = 0.0
+	blind_time = 0.0
+	field_time = 0.0
+	gravity_time = 0.0
+	power_time = 0.0
+	power_recovery = 1.0
+	power_reduce = 1.0
+	pull_velocity = Vector2.ZERO
+	over_boost_time = 0.0
 	_prev_fire = false
 	_prev_weapon_key = 0
 	_booster_input = BoosterInput.NOTHING
