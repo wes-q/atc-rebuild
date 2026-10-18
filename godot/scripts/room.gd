@@ -135,3 +135,16 @@ static func team_color(team: int) -> Color:
 		BLUE:
 			return Color8(2, 198, 255)
 	return Color8(93, 235, 136)
+
+## This recreation's own (step 16): movement states a second by players in the room. The host
+## relays every player's state to every other player, so its upload grows with about the
+## square of the player count; fewer states keep a 12-player room within a home upload.
+## Shots, swings, hits, guard and round events are separate messages and never wait.
+## full: the room master's override, every state at 60 a second.
+const FULL_STATE_RATE := 60
+static func state_rate(players: int, full := false) -> int:
+	if full or players <= 4:
+		return FULL_STATE_RATE
+	if players <= 8:
+		return 30
+	return 20

@@ -98,6 +98,12 @@ var _in_room := false
 var _match_on := false
 ## Players who came in during a battle and wait in the room for the next one.
 var _sitting_out: Dictionary = {}
+## Movement states every machine sends, by players in the room (Room.state_rate). full_rate is
+## the room master's override to 60 a second (test option "fullrate", or /rate full in the
+## room chat); the host's choice travels with the roster.
+var full_rate := OS.get_cmdline_user_args().has("fullrate")
+var _state_tick := 0
+var _announced_rate := 0
 ## Host: the start countdown's next number (5 to 1), -1 when not counting, and its clock.
 var _countdown := -1
 var _countdown_timer := 0.0
@@ -595,6 +601,7 @@ func _reset_world() -> void:
 	_in_room = false
 	_match_on = false
 	_countdown = -1
+	_announced_rate = 0
 	room_password = ""
 	front.lan.stop()
 
@@ -1037,8 +1044,10 @@ func _send_roster() -> void:
 	_net_roster.rpc(roster, {
 		"round": round_number, "on": _match_on, "map": map_choice, "spawns": spawn_points,
 		"teams": team_mode, "names": names, "bodies": bodies, "name": room_name,
-		"beginner": room_beginner,
+		"beginner": room_beginner, "full": full_rate,
 	})
+	# After the notice of whoever came in or left.
+	_announce_rate.call_deferred()
 
 @rpc("authority", "call_remote", "reliable")
 func _net_roster(list: Dictionary, info: Dictionary) -> void:
@@ -1048,6 +1057,7 @@ func _net_roster(list: Dictionary, info: Dictionary) -> void:
 	bodies = info["bodies"]
 	room_name = str(info["name"])
 	room_beginner = bool(info["beginner"])
+	full_rate = bool(info.get("full", false))
 	spawn_points.clear()
 	for i in info["spawns"]:
 		spawn_points.append(int(i))
@@ -1152,8 +1162,13 @@ static func _map_ids() -> Array[String]:
 	return out
 
 ## Room chat (game_room_on_enter_chatting_msg): to everyone in the room, by way of the host.
+## "/rate full" and "/rate auto" are the room master's switch for the movement rate (this
+## recreation's own command, in the style of the original's /invite and /wait).
 func _send_chat(line: String) -> void:
 	if not _networked():
+		return
+	if line.begins_with("/rate"):
+		_rate_command(line.trim_prefix("/rate").strip_edges())
 		return
 	_net_chat.rpc(line)
 	_show_chat(local_id, line)
@@ -1161,6 +1176,20 @@ func _send_chat(line: String) -> void:
 @rpc("any_peer", "call_remote", "reliable")
 func _net_chat(line: String) -> void:
 	_show_chat(multiplayer.get_remote_sender_id(), line.left(60))
+
+func _rate_command(arg: String) -> void:
+	if mode != "host":
+		_room_notice_local("Only the room master can change the movement rate.")
+		return
+	if arg == "full":
+		full_rate = true
+	elif arg == "auto":
+		full_rate = false
+	else:
+		_room_notice_local("Movement updates: %d a second. /rate full keeps 60 a second, /rate auto goes by players." % state_rate())
+		return
+	_announced_rate = -1
+	_send_roster()
 
 ## GameRoomChatEventHandler: "name : message", your own lines in yellow.
 func _show_chat(id: int, line: String) -> void:
@@ -1177,6 +1206,8 @@ func _net_room_notice(msg: String) -> void:
 	_room_notice_local(msg)
 
 func _room_notice_local(msg: String) -> void:
+	if _netlog:
+		print("[room] System : ", msg)
 	front.room_console_add("System : " + msg, FrontEnd.NOTICE)
 
 ## What the game room page shows (FrontEnd.update_game_room).
@@ -1224,7 +1255,7 @@ func _sit_out(m: Mech) -> void:
 
 ## The status line under a battle, for the master: where the room can be reached.
 func _host_status() -> void:
-	var where := "Hosting %s on %s port %d. %d of %d players." % [room_name, ", ".join(_lan_addresses()), PORT, roster.size(), MAX_PLAYERS]
+	var where := "Hosting %s on %s port %d. %d of %d players, %d updates a second." % [room_name, ", ".join(_lan_addresses()), PORT, roster.size(), MAX_PLAYERS, state_rate()]
 	if team_mode:
 		var red := 0
 		for sl in roster.values():
@@ -1233,7 +1264,26 @@ func _host_status() -> void:
 		where += " Red %d, blue %d." % [red, roster.size() - red]
 	_status = where
 
-## Owner's state, every physics tick. Unreliable: a newer one replaces a lost one.
+## Physics ticks between this machine's states: 1 at 60 a second, 2 at 30, 3 at 20.
+func state_rate() -> int:
+	return Room.state_rate(roster.size(), full_rate)
+
+func _state_every() -> int:
+	return maxi(1, roundi(Engine.physics_ticks_per_second / float(state_rate())))
+
+## Host: a System notice when the room's rate changes, so everyone knows why remote mechs
+## move a little less smoothly in a big room.
+func _announce_rate() -> void:
+	var rate := state_rate()
+	if rate == _announced_rate:
+		return
+	var first := _announced_rate == 0
+	_announced_rate = rate
+	if not first:
+		_room_notice("Movement updates: %d a second for %d players%s." % [rate, roster.size(), " (full rate set by the room master)" if full_rate else ""])
+
+## Owner's state, at the room's rate. Unreliable: a newer one replaces a lost one. Between
+## states a remote mech carries on along its last direction and speed (MechSim.step_remote).
 @rpc("any_peer", "call_remote", "unreliable_ordered")
 func _net_state(state: Array) -> void:
 	var id := multiplayer.get_remote_sender_id()
@@ -1524,7 +1574,9 @@ func _physics_process(dt: float) -> void:
 					_net_detonate.rpc()
 			_prev_fire_local = intent.fire
 			m.sim.step(intent, dt)
-			if _networked():
+			_state_tick += 1
+			if _networked() and _state_tick >= _state_every():
+				_state_tick = 0
 				var state := m.sim.snapshot()
 				state.append(m.lock_target)
 				state.append(m.weapons)
@@ -1570,6 +1622,10 @@ func _physics_process(dt: float) -> void:
 					lying += int(bl.is_lying())
 			if mines > 0:
 				parts.append("mines=%d lying=%d" % [mines, lying])
+			# The host's upload over the last second, everything it sent and relayed.
+			var enet := multiplayer.multiplayer_peer as ENetMultiplayerPeer
+			if mode == "host" and enet and enet.host:
+				parts.append("up=%dKB/s rate=%d" % [enet.host.pop_statistic(ENetConnection.HOST_TOTAL_SENT_DATA) / 1024, state_rate()])
 			print("[%s r%d %s f%d] " % [mode, round_number, "on" if round_active else "off", _capture_index], "  ".join(parts))
 
 func _process(dt: float) -> void:
