@@ -16,7 +16,6 @@ const RADAR_HALF := Vector2(80, 60)
 const HOOD_CENTRE := Vector2(400, 300)
 const HOOD_RANGE := 180.0
 ## Team 0 colour for names and markers (Radar::render_name). Every free-for-all player is team 0.
-const TEAM0_COLOR := Color8(93, 235, 136)
 
 ## Another mech as the HUD needs it.
 class Tracked:
@@ -24,6 +23,7 @@ class Tracked:
 	var pos := Vector2.ZERO
 	var name := ""
 	var alive := true
+	var team := Room.NONE
 	var hood_pos := Vector2.ZERO
 	var hood_set := false
 
@@ -36,6 +36,14 @@ var user_state: OriginalUI
 var focus: OriginalUI
 var radar: OriginalUI
 var guard_gage: OriginalUI
+## Tab: every player's face, HP and name (res_dlg_game_fight_playercondition).
+var play_condition: OriginalUI
+var team_mode := false
+var my_team := Room.NONE
+## [slot, robot face 1-5, HP 0..1, name, alive] for everyone in the match.
+var board: Array = []
+var show_board := false
+var _board_w := {} ## slot -> shown bar width
 ## Radar::hide_time: an EMP hit blanks the enemy blips, edge markers and lock-on marks.
 var jam_time := 0.0
 var _gauge_w := {} ## bar name -> shown width, easing to the target
@@ -81,7 +89,7 @@ func _ready() -> void:
 	_status.position.y -= 44
 	_status.position.x -= 12
 	_help = _label(12, Color(0.65, 0.7, 0.8))
-	_help.text = "WASD: move   Mouse: aim   Left: fire   Right: boost   Space: guard   +/-: camera   M: sound   Esc: menu"
+	_help.text = "WASD: move   Mouse: aim   Left: fire   Right: boost   Space: guard   Tab: players   +/-: camera   M: sound   Esc: menu"
 	_help.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_RIGHT)
 	_help.grow_horizontal = Control.GROW_DIRECTION_BEGIN
 	_help.position.y -= 22
@@ -100,8 +108,10 @@ func _build_original() -> void:
 	user_state = OriginalUI.create("res_dlg_game_fight_user_state")
 	self_state = OriginalUI.create("res_dlg_game_fight_self_user_state")
 	guard_gage = OriginalUI.create_child("res_dlg_game_fight_background", "guard_gage")
+	play_condition = OriginalUI.create("res_dlg_game_fight_playercondition")
+	play_condition.visible = false
 	# Added in create()'s order, then sorted by order (weapon, user_state and focus are 0).
-	for d in [guard_gage, weapon, user_state, focus, self_state, radar, playtime, booster]:
+	for d in [guard_gage, weapon, user_state, focus, self_state, radar, playtime, booster, play_condition]:
 		screen.add_child(d)
 	user_state.visible = false
 	playtime.pos_set(334, 10)
@@ -168,6 +178,7 @@ func refresh(sim: MechSim, me_name: String, status: String, round_time: float, c
 		t.pos = o[1]
 		t.name = o[2]
 		t.alive = o[3]
+		t.team = o[4] if o.size() > 4 else Room.NONE
 	for id in _tracked.keys():
 		if not seen.has(id):
 			_tracked.erase(id)
@@ -180,6 +191,7 @@ func refresh(sim: MechSim, me_name: String, status: String, round_time: float, c
 		for sl in sim.slots:
 			ids.append(sl.data.id)
 		_initial_weapons(ids)
+	_update_board(dt)
 	time_update(round_time)
 	booster_update(int(sim.booster_gage), int(sim.energy_max), int(sim.energy_low_line))
 	self_user_state(Bodies.face(sim.body), me_name, maxi(0, sim.life), 1)
@@ -216,6 +228,47 @@ func guard_gage_update(guard: float, hp: float, bit: float, x: float, y: float, 
 		var win := guard_gage.w(bar)
 		if win:
 			win.size_set(cur, 3)
+
+## EnableUserViewInfo while Tab is held, DisableUserViewInfo when it is let go. The base
+## shows the single or team layout; each slot shows the robot face (greyed when knocked out),
+## an HP bar coloured by what is left (10% and under, 66% and under, more) eased over 0.5 s,
+## and the name.
+func _update_board(dt: float) -> void:
+	if play_condition == null:
+		return
+	play_condition.visible = show_board
+	if not show_board:
+		return
+	play_condition.texture_switch(2 if team_mode else 1)
+	var filled := {}
+	for e in board:
+		var slot: int = e[0]
+		var win := play_condition.w("slot%d" % (slot % Room.SIZE + 1))
+		if win == null:
+			continue
+		filled[slot] = true
+		var face := win.w("char_face")
+		face.visible = true
+		# The list opens with an empty entry, then five live faces, then five knocked out.
+		face.texture_switch(int(e[1]) + (1 if e[4] else 6))
+		var hp: float = clampf(e[2], 0.0, 1.0)
+		var bar := win.w("gage_bar")
+		bar.visible = true
+		bar.texture_switch(1 if hp <= 0.1 else (2 if hp <= 0.66 else 3))
+		var target := 125.0 * hp
+		var cur: float = _board_w.get(slot, target)
+		cur = move_toward(cur, target, maxf(absf(target - cur), 1.0) / 0.5 * dt)
+		_board_w[slot] = cur
+		bar.size_set(cur, 3)
+		win.w("name").text_set(str(e[3]))
+	for i in Room.SIZE:
+		if filled.has(i):
+			continue
+		var win := play_condition.w("slot%d" % (i + 1))
+		if win:
+			win.w("char_face").visible = false
+			win.w("gage_bar").visible = false
+			win.w("name").text_set("")
 
 ## OnTimeUpdate: the clock in hundredths, digit by digit. The last-but-one digit wraps at 6,
 ## as in the original script, so the hundredths read 00..59 in steps of ten.
@@ -345,25 +398,31 @@ func _draw_overlay() -> void:
 	if _camera == null or booster == null or not booster.visible:
 		return
 	var ours := OriginalUI.texture("ui/widget/game_fight/rader/ours.png")
+	var red_dot := OriginalUI.texture("ui/widget/game_fight/rader/enermy.png")
 	var hood_near := OriginalUI.texture("ui/widget/game_fight/rader/hood_player_enemy.png")
 	var hood_far := OriginalUI.texture("ui/widget/game_fight/rader/hood_player_enemy_far.png")
+	var hood_friend := OriginalUI.texture("ui/widget/game_fight/rader/hood_player_friend.png")
 	var font := ThemeDB.fallback_font
-	# Every free-for-all player is team 0, so every dot uses the "ours" image.
-	if ours:
-		overlay.draw_texture_rect(ours, Rect2(RADAR_POS, Vector2(5, 5)), false)
+	# Radar dots by team, not by side: red players use the "enermy" image, everyone else
+	# (blue, or free-for-all) the "ours" one, your own dot included.
+	var my_dot := red_dot if my_team == Room.RED else ours
+	if my_dot:
+		overlay.draw_texture_rect(my_dot, Rect2(RADAR_POS, Vector2(5, 5)), false)
 	for t: Tracked in _tracked.values():
 		if not t.alive:
 			continue
 		var rel := Vector2(t.pos.x - _me.x, -(t.pos.y - _me.y)) * RADAR_SCALE
-		if jam_time <= 0.0 and absf(rel.x) <= RADAR_HALF.x and absf(rel.y) <= RADAR_HALF.y and ours:
-			overlay.draw_texture_rect(ours, Rect2(RADAR_POS + rel, Vector2(5, 5)), false)
+		var dot := red_dot if t.team == Room.RED else ours
+		var color := Room.team_color(t.team)
+		if jam_time <= 0.0 and absf(rel.x) <= RADAR_HALF.x and absf(rel.y) <= RADAR_HALF.y and dot:
+			overlay.draw_texture_rect(dot, Rect2(RADAR_POS + rel, Vector2(5, 5)), false)
 		var on_screen := _to_screen(t.pos)
 		var inside := on_screen.x >= 0 and on_screen.x <= SCREEN.x and on_screen.y >= 0 and on_screen.y <= SCREEN.y
 		if inside:
 			# Name 105 x 0.3 + 5 units up the plane, drawn 40 pixels left of that point.
 			var at := _to_screen(t.pos, 105.0 * Original.SCALE + 5.0) + Vector2(-40, 0)
 			overlay.draw_string_outline(font, at, t.name, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, 3, Color(0, 0, 0, 0.9))
-			overlay.draw_string(font, at, t.name, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, TEAM0_COLOR)
+			overlay.draw_string(font, at, t.name, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, color)
 		elif jam_time <= 0.0:
 			# get_position_on_hood: a marker on a 180-pixel ring, moved only past 5 pixels.
 			var slope := atan2(t.pos.y - _me.y, t.pos.x - _me.x)
@@ -371,10 +430,11 @@ func _draw_overlay() -> void:
 			if not t.hood_set or hp.distance_squared_to(t.hood_pos) > 25.0:
 				t.hood_pos = hp
 				t.hood_set = true
-			var tex := hood_near if t.id == _nearest_id else hood_far
+			# Teammates get the friend marker, the nearest enemy the bright one, tinted by team.
+			var tex := hood_friend if Room.teammates(t.team, my_team) else (hood_near if t.id == _nearest_id else hood_far)
 			if tex:
 				overlay.draw_set_transform(t.hood_pos + Vector2(5, 5), -slope)
-				overlay.draw_texture_rect(tex, Rect2(Vector2(-5, -5), Vector2(10, 10)), false, TEAM0_COLOR)
+				overlay.draw_texture_rect(tex, Rect2(Vector2(-5, -5), Vector2(10, 10)), false, color)
 				overlay.draw_set_transform(Vector2.ZERO)
 	# Lock-on markers, hidden while jammed (render_lock_on_system); lock-on still works.
 	if jam_time <= 0.0:

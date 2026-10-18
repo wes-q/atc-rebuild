@@ -55,6 +55,9 @@ func _init() -> void:
 	test_combo_keys_follow_facing()
 	test_combo_input()
 	test_combo_swings()
+	test_room_slots()
+	test_room_start_points()
+	test_room_end_and_winners()
 	print("\n%d passed, %d failed" % [passed, failures])
 	quit(1 if failures > 0 else 0)
 
@@ -911,3 +914,55 @@ func test_combo_swings() -> void:
 	# The handler holds the sim; let go of it so the sim is freed.
 	for c in sim.swung.get_connections():
 		sim.swung.disconnect(c.callable)
+
+func test_room_slots() -> void:
+	print("room slots and teams (srv_rcroom.cpp)")
+	check(Room.join_slot([], false) == 0 and Room.join_slot([0, 1, 3], false) == 2, "free-for-all: the first free slot")
+	var full: Array = []
+	for i in 12:
+		full.append(i)
+	check(Room.join_slot(full, false) == -1 and Room.join_slot(full, true) == -1, "a full room of 12 takes nobody")
+	check(Room.join_slot([], true) == 0 and Room.join_slot([0], true) == 6 and Room.join_slot([0, 6], true) == 1, "team battle: the smaller side, red when level")
+	check(Room.join_slot([0, 1, 2, 3, 4, 5, 6], true) == 7 and Room.join_slot([0, 6, 7, 8, 9, 10, 11], true) == 1, "a full side sends the joiner to the other")
+	check(Room.team_of(5, true) == Room.RED and Room.team_of(6, true) == Room.BLUE and Room.team_of(6, false) == Room.NONE, "slots 0-5 red, 6-11 blue, no teams in free-for-all")
+	check(Room.switch_slot(2, [0, 2, 6]) == 7 and Room.switch_slot(6, [0, 2, 6]) == 1, "switching takes the first free slot on the other side")
+	check(Room.can_start([0, 6], true) and not Room.can_start([0, 1, 6], true) and Room.can_start([0, 1, 6], false), "team battle needs equal sides")
+	check(not Room.can_start([0], false), "and any game needs two")
+	check(Room.teammates(Room.RED, Room.RED) and not Room.teammates(Room.NONE, Room.NONE) and not Room.teammates(Room.RED, Room.BLUE), "teammates share a team; free-for-all has none")
+
+func test_room_start_points() -> void:
+	print("start points (RCNetGameServer)")
+	var rng := RandomNumberGenerator.new()
+	var ok := true
+	var blue_first_six := 0
+	for trial in 200:
+		rng.seed = trial
+		var pts := Room.start_points([0, 1, 2, 6, 7, 8], true, rng)
+		for s in [0, 1, 2]:
+			ok = ok and pts[s] >= 0 and pts[s] < 6
+		for s in [6, 7, 8]:
+			ok = ok and pts[s] >= 6 and pts[s] < 12
+		var seen := {}
+		for s in [0, 1, 2, 6, 7, 8]:
+			ok = ok and not seen.has(pts[s])
+			seen[pts[s]] = true
+		if pts[6] == 6:
+			blue_first_six += 1
+	check(ok, "red starts on points 0-5, blue on 6-11, never two on one point")
+	check(blue_first_six > 100, "the first blue lands on point 6 more than half the time (%d of 200), as the server's draw did" % blue_first_six)
+	rng.seed = 7
+	var all: Array = []
+	for i in 12:
+		all.append(i)
+	var ffa := Room.start_points(all, false, rng)
+	var sorted := ffa.duplicate()
+	sorted.sort()
+	check(sorted == Array(range(12), TYPE_INT, "", null), "twelve in free-for-all fill all twelve points")
+
+func test_room_end_and_winners() -> void:
+	print("round end and winners (GameRoom::is_game_end, get_winners_team)")
+	check(Room.round_over([3], false) and not Room.round_over([3, 5], false) and Room.round_over([], false), "free-for-all: one or none left")
+	check(not Room.round_over([0, 7], true) and Room.round_over([0, 1], true) and Room.round_over([6], true), "team battle: one side empty")
+	check(Room.winning_slots([0, 1, 6, 7], [1], true) == [0, 1], "the side still standing wins, its fallen included")
+	check(Room.winning_slots([0, 6], [], true).is_empty() and Room.winning_slots([0, 3], [], false).is_empty(), "nobody left: everyone loses, no draw")
+	check(Room.winning_slots([0, 3, 4], [4], false) == [4], "free-for-all: the survivor")

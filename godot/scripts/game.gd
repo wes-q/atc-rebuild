@@ -18,6 +18,8 @@ extends Node3D
 ## scripted duel, "netlog" for position logs.
 
 const PORT := 7777
+## Players in one match, the host included (MAX_PC_IN_ROOM, MAX_PLAYER).
+const MAX_PLAYERS := 12
 const DUMMY_ID := -1
 const NO_TARGET := 0
 ## _apply_hit without a direction: no guard test.
@@ -36,6 +38,8 @@ class Mech:
 	var view: MechView
 	var body := "zeid"
 	var local := false
+	## Room.NONE in free-for-all, Room.RED or Room.BLUE in team battle (from the slot).
+	var team := Room.NONE
 	## Lock-on target's mech id, 0 for none (LockOnSystem). Sent with the state.
 	var lock_target := 0
 	## Target taken when the current burst started (pt_send_shoot's target_id).
@@ -51,9 +55,10 @@ class Stats:
 	var kills := 0
 	var damage := 0
 
-	## RayCrashServer::user_damage_to_point at equal grades: damage / 10 * 330 / 400.
-	func points() -> int:
-		return int(damage / 10.0 * 330.0 / 400.0)
+	## RayCrashServer::user_damage_to_point at equal grades: damage / 10 * 330 / 400, doubled
+	## in a free-for-all that started with three or more (att_point *= 2).
+	func points(double := false) -> int:
+		return int(damage / 10.0 * 330.0 / 400.0) * (2 if double else 1)
 
 var camera: Camera3D
 var sky: Node3D
@@ -65,6 +70,18 @@ var map_node: Node3D
 var map_choice := "space"
 ## Start point index per slot this round (RayCrashServer::position_set: random, no repeats).
 var spawn_points: Array[int] = [0, 1]
+## Peer id -> slot, kept by the host and sent to everyone whenever it changes. Slots are
+## handed out lowest first and decide the start point, name and colour scheme.
+var roster: Dictionary = {}
+## Host: start the first round on its own once this many players are in (0: wait for Enter).
+var _auto_start := _arg_int("players=")
+## The room's mode (byTeam): team battle, chosen by the host and sent with the roster.
+var team_mode := OS.get_cmdline_user_args().has("teams")
+## Mechs in the round when it began, for the free-for-all points rule.
+var round_starters := 0
+## After your mech is gone the camera follows another player (set_next_camera).
+var _watch_id := 0
+var _rng := RandomNumberGenerator.new()
 var hud: Hud
 var sound: GameSound
 var menu: StartMenu
@@ -107,6 +124,8 @@ var _autoguard := OS.get_cmdline_user_args().has("autoguard")
 ## Autopilot: with a sword in reach, enter command combos (forward, click; then back,
 ## forward, click for the finisher).
 var _autocombos := OS.get_cmdline_user_args().has("combos")
+## Test option: keep the Tab player panel open.
+var _hold_tab := OS.get_cmdline_user_args().has("tab")
 ## Test option "hp=<n>": start every mech with n armour points so knockouts come quickly.
 var _test_hp := _arg_int("hp=")
 ## Practice: the target starts this many units in front of you each round (for testing).
@@ -185,6 +204,7 @@ func _show_menu(message: String) -> void:
 		menu.join_chosen.connect(start_join)
 		menu.select_map(map_choice)
 		menu.select_body(body_choice)
+		menu.select_mode(team_mode)
 	menu.visible = true
 	menu.show_message(message)
 
@@ -193,6 +213,7 @@ func _hide_menu() -> void:
 		menu.visible = false
 		map_choice = menu.map_id
 		body_choice = menu.body_id
+		team_mode = menu.team_mode
 
 ## Builds the arena if it is not the one already showing.
 func _use_map(id: String) -> void:
@@ -215,35 +236,37 @@ func _attach_map(m: Mech) -> void:
 	m.sim.map = map if (m.local or m.id == DUMMY_ID) else null
 
 ## Random distinct start points for each slot, like position_set for a free-for-all room.
+## Room.start_points for everyone in the room, by slot (practice: the dummy is slot 1).
 func _pick_spawns() -> Array[int]:
-	var order: Array[int] = []
-	for i in map.spawns.size():
-		order.append(i)
-	order.shuffle()
-	return order.slice(0, 2)
+	var slots: Array = []
+	for m: Mech in mechs.values():
+		slots.append(m.slot)
+	return Room.start_points(slots, team_mode, _rng)
 
 func _spawn_pos(slot: int) -> Vector2:
 	if map == null or map.spawns.is_empty():
 		return Vector2(-150 + 300 * slot, 0)
-	return map.spawns[spawn_points[slot] % map.spawns.size()]
+	var point := spawn_points[slot] if slot < spawn_points.size() and spawn_points[slot] >= 0 else slot
+	return map.spawns[point % map.spawns.size()]
 
-## Facing toward the arena centre. The original's start direction is not in the source we
-## have (inferred).
-func _spawn_facing(slot: int) -> int:
-	var p := _spawn_pos(slot)
-	var centre := Vector2((map.x_min + map.x_max) * 0.5, (map.y_min + map.y_max) * 0.5) if map else Vector2.ZERO
-	var to := centre - p
-	return Original.deg_from_vec2(to.x, to.y) if to.length_squared() > 1.0 else 0
+## The server sent no start direction: MoveData's muzdir and movdir start at 0.
+func _spawn_facing(_slot: int) -> int:
+	return 0
 
 func _set_mode(m: String) -> void:
 	mode = m
-	var titles := {"": "", "practice": ": practice", "host": ": player 1 (host)", "join": ": player 2"}
-	DisplayServer.window_set_title("ATC Raycrash" + titles.get(m, ""))
+	var titles := {"": "", "practice": ": practice", "host": ": player 1 (host)", "join": ": joining"}
+	var title: String = titles.get(m, "")
+	if m == "join" and roster.has(local_id):
+		title = ": player %d" % (int(roster[local_id]) + 1)
+	DisplayServer.window_set_title("ATC Raycrash" + title)
 
 func start_practice() -> void:
 	_reset_world()
 	_set_mode("practice")
 	_hide_menu()
+	# Practice is you and a target, free-for-all.
+	team_mode = false
 	_use_map(map_choice)
 	local_id = 1
 	_spawn(local_id, 0, true, body_choice)
@@ -254,7 +277,7 @@ func start_practice() -> void:
 func start_host() -> void:
 	_reset_world()
 	var peer := ENetMultiplayerPeer.new()
-	var err := peer.create_server(PORT, 1)
+	var err := peer.create_server(PORT, MAX_PLAYERS - 1)
 	if err != OK:
 		_show_menu("Could not host on port %d (error %d). Is another copy already hosting?" % [PORT, err])
 		return
@@ -263,8 +286,9 @@ func start_host() -> void:
 	_hide_menu()
 	_use_map(map_choice)
 	local_id = multiplayer.get_unique_id()
+	roster = {local_id: 0}
 	_spawn(local_id, 0, true, body_choice)
-	_status = "Hosting %s on %s port %d. Waiting for player 2." % [map.title, ", ".join(_lan_addresses()), PORT]
+	_host_status()
 
 func start_join(address: String) -> void:
 	_reset_world()
@@ -287,6 +311,7 @@ func _reset_world() -> void:
 		multiplayer.multiplayer_peer.close()
 	multiplayer.multiplayer_peer = OfflineMultiplayerPeer.new()
 	local_id = 0
+	roster.clear()
 	_clock = 0.0
 	round_active = false
 	round_number = 0
@@ -315,6 +340,16 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("ui_cancel") and mode != "":
 		_reset_world()
 		_show_menu("")
+	# The host starts the match once everyone is in (the room master's start button).
+	if mode == "host" and round_number == 0 and Room.can_start(roster.values(), team_mode) and event is InputEventKey \
+			and event.pressed and not event.echo and (event as InputEventKey).keycode in [KEY_ENTER, KEY_KP_ENTER]:
+		_start_next_round()
+	if team_mode and _networked() and not round_active and event is InputEventKey and event.pressed \
+			and not event.echo and (event as InputEventKey).keycode == KEY_T:
+		if mode == "host":
+			_change_team(local_id)
+		else:
+			_net_change_team.rpc_id(1)
 	if event is InputEventKey and event.pressed and not event.echo and (event as InputEventKey).keycode == KEY_M:
 		sound.enabled = not sound.enabled
 		if not sound.enabled:
@@ -333,6 +368,8 @@ func _begin_round(number: int, map_id: String, spawns: Array[int]) -> void:
 	_next_round_timer = -1.0
 	_clear_bullets()
 	stats.clear()
+	round_starters = mechs.size()
+	_watch_id = local_id
 	# Each original match started a random track from the first 19 of the BGM list.
 	sound.play_battle_bgm()
 	for m: Mech in mechs.values():
@@ -356,6 +393,8 @@ func _begin_round(number: int, map_id: String, spawns: Array[int]) -> void:
 		var at := me.sim.pos + Original.vec2_from_deg(me.sim.facing) * _dummy_near
 		d.sim.reset_at(at, (me.sim.facing + 180) % 360)
 	hud.hide_result()
+	if mode == "host":
+		_host_status()
 
 @rpc("authority", "call_remote", "reliable")
 func _net_round_start(number: int, map_id: String, spawns: Array) -> void:
@@ -378,49 +417,60 @@ func _check_round_end() -> void:
 		return
 	if mode == "host" and mechs.size() < 2:
 		return
-	var alive: Array[int] = []
-	for m: Mech in mechs.values():
-		if m.sim.life > 0:
-			alive.append(m.id)
-	if alive.size() <= 1:
+	if Room.round_over(_living_slots(), team_mode):
 		_end_timer = RESULT_DELAY
 		round_active = false
 
-func _send_result() -> void:
-	var winner := -999
+func _living_slots() -> Array:
+	var out := []
 	for m: Mech in mechs.values():
 		if m.sim.life > 0:
-			winner = m.id
+			out.append(m.slot)
+	return out
+
+func _send_result() -> void:
+	var slots := []
+	for m: Mech in mechs.values():
+		slots.append(m.slot)
+	var winning := Room.winning_slots(slots, _living_slots(), team_mode)
+	var winners: Array[int] = []
+	for m: Mech in mechs.values():
+		if m.slot in winning:
+			winners.append(m.id)
 	var tally := {}
 	for id in stats:
 		tally[id] = [(stats[id] as Stats).kills, (stats[id] as Stats).damage]
-	_show_result(winner, tally)
+	_show_result(winners, tally)
 	if mode == "host":
-		_net_round_result.rpc(winner, tally)
+		_net_round_result.rpc(winners, tally)
 	_next_round_timer = RESULT_TIME
+	if mode == "host":
+		_host_status()
 
 @rpc("authority", "call_remote", "reliable")
-func _net_round_result(winner: int, tally: Dictionary) -> void:
-	_show_result(winner, tally)
+func _net_round_result(winners: Array, tally: Dictionary) -> void:
+	_show_result(winners, tally)
 
-func _show_result(winner: int, tally: Dictionary) -> void:
+## Players see win or lose: in team battle the whole side shares it, and with nobody left
+## everyone loses (get_winners_team returns no team; there is no draw).
+func _show_result(winners: Array, tally: Dictionary) -> void:
 	round_active = false
-	if winner != -999:
-		wins[winner] = int(wins.get(winner, 0)) + 1
-	var title := "DRAW"
-	if winner == local_id:
-		title = "YOU WIN"
-	elif winner != -999:
-		title = "YOU LOSE"
+	for id in winners:
+		wins[int(id)] = int(wins.get(int(id), 0)) + 1
+	var won := winners.has(local_id)
+	var title := "YOU WIN" if won else "YOU LOSE"
+	if team_mode and not winners.is_empty() and mechs.has(int(winners[0])):
+		title += "    %s TEAM WINS" % ("RED" if (mechs[int(winners[0])] as Mech).team == Room.RED else "BLUE")
 	# Victory music for the winner, defeat for everyone else (NetManager).
-	sound.play_bgm(GameSound.BGM_VICTORY if winner == local_id else GameSound.BGM_DEFEAT)
+	sound.play_bgm(GameSound.BGM_VICTORY if won else GameSound.BGM_DEFEAT)
+	var double := not team_mode and round_starters >= 3
 	var lines: Array[String] = []
 	for m: Mech in _mechs_in_slot_order():
 		var t: Array = tally.get(m.id, [0, 0])
 		var s := Stats.new()
 		s.damage = int(t[1])
-		lines.append("%-10s  kills %d   damage %4d   points %3d   rounds won %d" % [
-			_mech_label(m), int(t[0]), s.damage, s.points(), int(wins.get(m.id, 0))])
+		lines.append("%-14s  kills %d   damage %4d   points %3d   rounds won %d" % [
+			_mech_label(m), int(t[0]), s.damage, s.points(double), int(wins.get(m.id, 0))])
 	hud.show_result(title, lines, "Round %d    time %s    next round in %d s" % [round_number, Hud.clock_text(round_time), int(RESULT_TIME)])
 
 func _mechs_in_slot_order() -> Array:
@@ -437,14 +487,20 @@ func _mech_name(m: Mech) -> String:
 func _mech_label(m: Mech) -> String:
 	if m.id == DUMMY_ID:
 		return "Target"
-	return ("You, P%d" if m.id == local_id else "P%d") % (m.slot + 1)
+	var label := ("You, P%d" if m.id == local_id else "P%d") % (m.slot + 1)
+	match m.team:
+		Room.RED:
+			label += " red"
+		Room.BLUE:
+			label += " blue"
+	return label
 
 # --- Network events ---------------------------------------------------------------------
 
+## Connected: the host's roster brings our slot and everyone else's mech.
 func _on_connected_to_server() -> void:
 	local_id = multiplayer.get_unique_id()
-	_spawn(local_id, 1, true, body_choice)
-	_status = "Connected. You are player 2."
+	_status = "Connected. Waiting for the host's player list."
 
 func _on_connection_failed() -> void:
 	_reset_world()
@@ -454,29 +510,142 @@ func _on_server_disconnected() -> void:
 	_reset_world()
 	_show_menu("The host left the match.")
 
+## Host: a new player takes the lowest free slot. Mid-round they sit out until the next one.
 func _on_peer_connected(id: int) -> void:
-	if not mechs.has(id):
-		_spawn(id, 0 if id == 1 else 1, false)
-	if mode == "host":
-		_status = "Player 2 joined. %s." % map.title
-		var next := round_number + 1
-		var spawns := _pick_spawns()
-		_begin_round(next, map.id, spawns)
-		_net_round_start.rpc_id(id, next, map.id, spawns)
+	if mode != "host":
+		return
+	var slot := Room.join_slot(roster.values(), team_mode)
+	if slot < 0:
+		multiplayer.multiplayer_peer.disconnect_peer(id)
+		return
+	roster[id] = slot
+	_spawn(id, slot, false)
+	if round_active:
+		_sit_out(mechs[id])
+	_send_roster()
+	_host_status()
+	if _auto_start > 0 and roster.size() >= _auto_start and round_number == 0 and Room.can_start(roster.values(), team_mode):
+		_start_next_round()
 
 func _on_peer_disconnected(id: int) -> void:
 	_remove_mech(id)
 	if mode == "host":
-		_status = "Player 2 left. Waiting for player 2."
-		round_active = false
-		hud.hide_result()
+		roster.erase(id)
+		_send_roster()
+		if roster.size() < 2:
+			round_active = false
+			_end_timer = -1.0
+			_next_round_timer = -1.0
+			hud.hide_result()
+		_host_status()
+
+## The host's slot list. A joiner learns its own slot here and builds everyone's mech; one who
+## joins mid-round sits out until the next round starts.
+func _send_roster() -> void:
+	_net_roster.rpc(roster, round_number, round_active, map.id, spawn_points, team_mode)
+
+@rpc("authority", "call_remote", "reliable")
+func _net_roster(list: Dictionary, number: int, active: bool, map_id: String, spawns: Array, teams: bool) -> void:
+	team_mode = teams
+	if map == null or map.id != map_id:
+		_use_map(map_id)
+	spawn_points.clear()
+	for i in spawns:
+		spawn_points.append(int(i))
+	var first := not mechs.has(local_id)
+	roster = list
+	for id in mechs.keys():
+		if not roster.has(id):
+			_remove_mech(id)
+	if first:
+		round_number = number
+		round_active = active
+	for id: int in roster:
+		if not mechs.has(id):
+			_spawn(id, int(roster[id]), id == local_id, body_choice if id == local_id else "zeid")
+			# Whoever is new sits out a round already under way; those already playing send
+			# their own state.
+			if active and (id == local_id or not first):
+				_sit_out(mechs[id])
+	_apply_slots()
+	_set_mode("join")
+	_status = "You are player %d of %d%s.%s" % [int(roster[local_id]) + 1, roster.size(), _team_words(int(roster[local_id])),
+		" Waiting for the next round." if first and active else ""]
+	if team_mode and not round_active:
+		_status += " T: change team."
+
+## Slots and teams from the roster onto the mechs (a team change moves a slot).
+func _apply_slots() -> void:
+	for id: int in roster:
+		if mechs.has(id):
+			var m: Mech = mechs[id]
+			var slot := int(roster[id])
+			if m.slot != slot:
+				m.slot = slot
+				m.view.set_skin(slot)
+			m.team = Room.team_of(slot, team_mode)
+
+func _team_words(slot: int) -> String:
+	match Room.team_of(slot, team_mode):
+		Room.RED:
+			return ", red team"
+		Room.BLUE:
+			return ", blue team"
+	return ""
+
+## A player asks the host to move to the other side (MSERVER_ROOM_CHANGE_TEAM_SLOT_REQ),
+## between rounds only.
+@rpc("any_peer", "call_remote", "reliable")
+func _net_change_team() -> void:
+	_change_team(multiplayer.get_remote_sender_id())
+
+func _change_team(id: int) -> void:
+	if mode != "host" or not team_mode or round_active or not roster.has(id):
+		return
+	var to := Room.switch_slot(int(roster[id]), roster.values())
+	if to < 0:
+		return
+	roster[id] = to
+	_apply_slots()
+	_send_roster()
+	_host_status()
+
+## Off the field until the next round: not drawn, not counted, no input.
+func _sit_out(m: Mech) -> void:
+	m.sim.life = 0
+	m.sim.is_dead = true
+	m.sim.is_dead_complete = true
+	m.death_played = true
+	m.exploded = true
+	m.view.visible = false
+
+func _host_status() -> void:
+	var where := "Hosting %s%s on %s port %d. %d of %d players." % [map.title, " (team battle)" if team_mode else "",
+		", ".join(_lan_addresses()), PORT, roster.size(), MAX_PLAYERS]
+	if team_mode:
+		var red := 0
+		for sl in roster.values():
+			if int(sl) < Room.HALF:
+				red += 1
+		where += " Red %d, blue %d." % [red, roster.size() - red]
+	if round_number == 0:
+		if Room.can_start(roster.values(), team_mode):
+			where += " Enter: start the match."
+		elif roster.size() >= 2:
+			where += " Teams must be even to start."
+		else:
+			where += " Waiting for players."
+	if team_mode and not round_active:
+		where += " T: change team."
+	_status = where
 
 ## Owner's state, every physics tick. Unreliable: a newer one replaces a lost one.
 @rpc("any_peer", "call_remote", "unreliable_ordered")
 func _net_state(state: Array) -> void:
 	var id := multiplayer.get_remote_sender_id()
+	# Mechs come from the roster; a state can beat it here.
 	if not mechs.has(id):
-		_spawn(id, 0 if id == 1 else 1, false)
+		return
 	var m: Mech = mechs[id]
 	# A state sent before the owner heard of a new round still carries the old round's knockout,
 	# which would end the new round at once.
@@ -536,6 +705,7 @@ func _spawn(id: int, slot: int, local: bool, body := "zeid") -> void:
 	var m := Mech.new()
 	m.id = id
 	m.slot = slot
+	m.team = Room.team_of(slot, team_mode)
 	m.local = local
 	mechs[id] = m
 	stats[id] = Stats.new()
@@ -641,7 +811,7 @@ func _step_swings(dt: float) -> void:
 			continue
 		var facing := Original.vec2_from_deg(attacker.sim.facing)
 		for victim: Mech in _mechs_in_slot_order():
-			if victim == attacker or victim.sim.life <= 0:
+			if victim == attacker or victim.sim.life <= 0 or Room.teammates(victim.team, attacker.team):
 				continue
 			var rel := victim.sim.pos - attacker.sim.pos
 			if rel.length() >= w.crash_radius or rel.length_squared() < 0.0001:
@@ -668,7 +838,7 @@ func lock_candidates(m: Mech) -> Array[Mech]:
 		return out
 	var facing := Original.vec2_from_deg(m.sim.facing)
 	for o: Mech in mechs.values():
-		if o == m or o.sim.is_dead_complete:
+		if o == m or o.sim.is_dead_complete or Room.teammates(o.team, m.team):
 			continue
 		var rel := o.sim.pos - m.sim.pos
 		if rel.length() > w.lockon_range() or rel.length_squared() < 0.0001:
@@ -699,13 +869,34 @@ func _remove_mech(id: int) -> void:
 		mechs.erase(id)
 		stats.erase(id)
 
+func _team_of_id(id: int) -> int:
+	return (mechs[id] as Mech).team if mechs.has(id) else Room.NONE
+
+## The mech the camera follows: yours, or once it is gone the next player still standing in
+## slot order (OnCameraPlayerIsDead, set_next_camera), kept until they fall in turn.
+func _watched() -> Mech:
+	var me := _local()
+	if me == null or not me.sim.is_dead_complete:
+		return me
+	var current: Mech = mechs.get(_watch_id)
+	if current and current != me and not current.sim.is_dead_complete:
+		return current
+	var order := _mechs_in_slot_order()
+	var start := order.find(current if current else me)
+	for i in range(1, order.size() + 1):
+		var m: Mech = order[(start + i) % order.size()]
+		if not m.sim.is_dead_complete:
+			_watch_id = m.id
+			return m
+	return me
+
 func _local() -> Mech:
 	return mechs.get(local_id)
 
 func _nearest_enemy(of: Mech, alive_only := true) -> Mech:
 	var best: Mech = null
 	for m: Mech in mechs.values():
-		if m == of or (alive_only and m.sim.is_dead_complete):
+		if m == of or (alive_only and m.sim.is_dead_complete) or Room.teammates(m.team, of.team):
 			continue
 		if best == null or m.sim.pos.distance_to(of.sim.pos) < best.sim.pos.distance_to(of.sim.pos):
 			best = m
@@ -762,7 +953,7 @@ func _physics_process(dt: float) -> void:
 			var parts: Array[String] = []
 			for m: Mech in mechs.values():
 				var flags := (" G" if m.sim.guarding else "") + (" C" if m.sim.is_confused() else "") + (" J" if m.local and hud.jam_time > 0.0 else "")
-				parts.append("%s%d %s pos=(%d,%d) hp=%d sh=%d%s" % ["me" if m.local else "peer", m.id, m.body, m.sim.pos.x, m.sim.pos.y, m.sim.life, m.sim.durability, flags])
+				parts.append("%s%d s%d t%d %s pos=(%d,%d) hp=%d sh=%d%s" % ["me" if m.local else "peer", m.id, m.slot, m.team, m.body, m.sim.pos.x, m.sim.pos.y, m.sim.life, m.sim.durability, flags])
 			var mines := 0
 			var lying := 0
 			for bl in bullets:
@@ -776,14 +967,20 @@ func _physics_process(dt: float) -> void:
 func _process(dt: float) -> void:
 	var me := _local()
 	if me:
-		_update_camera(me, dt)
+		_update_camera(_watched(), dt)
 	for m: Mech in mechs.values():
 		_draw_mech(m, dt)
-	var enemy := _nearest_enemy(me, false) if me else null
 	var others := []
+	var board := []
 	for m: Mech in mechs.values():
 		if m != me:
-			others.append([m.id, m.sim.pos, _mech_name(m), not m.sim.is_dead_complete])
+			others.append([m.id, m.sim.pos, _mech_name(m), not m.sim.is_dead_complete, m.team])
+		# Tab: everyone's face, HP and name by slot (EnableUserViewInfo).
+		board.append([m.slot, Bodies.face(m.body), float(maxi(0, m.sim.life)) / float(m.sim.life_max), _mech_name(m), m.sim.life > 0])
+	hud.team_mode = team_mode
+	hud.my_team = me.team if me else Room.NONE
+	hud.board = board
+	hud.show_board = (Input.is_physical_key_pressed(KEY_TAB) or _hold_tab) and me != null
 	var nearest := _nearest_enemy(me) if me else null
 	hud.lock_target_pos = null
 	hud.lock_candidates.clear()
@@ -981,8 +1178,9 @@ func _step_beams(dt: float) -> void:
 				continue
 		if beam.skip:
 			continue
+		var beam_team: int = (mechs[beam.shooter_id] as Mech).team if mechs.has(beam.shooter_id) else Room.NONE
 		for victim: Mech in _mechs_in_slot_order():
-			if victim.id == beam.shooter_id or victim.sim.life <= 0:
+			if victim.id == beam.shooter_id or victim.sim.life <= 0 or Room.teammates(victim.team, beam_team):
 				continue
 			if not Combat.line_hits(beam.start, beam.line_end(), victim.sim.pos, victim.sim.crash_radius):
 				continue
@@ -1091,7 +1289,10 @@ func _show_state(victim: Mech, weapon_id: int, count: int) -> void:
 ## An X-Mine looking for a target from where it lies.
 func _mine_target(owner_id: int, at: Vector2, detect_range: float) -> MechSim:
 	var players := []
+	var owner_team := _team_of_id(owner_id)
 	for m: Mech in mechs.values():
+		if m.id != owner_id and Room.teammates(m.team, owner_team):
+			continue
 		players.append([m.id, m.sim.pos, m.sim.life > 0])
 	var id := Combat.mine_target(owner_id, at, detect_range, players)
 	return (mechs[id] as Mech).sim if id != 0 and mechs.has(id) else null
@@ -1171,7 +1372,7 @@ func _step_bullets(dt: float) -> void:
 		for m: Mech in mechs.values():
 			if not alive:
 				break
-			if m.id == shooter or m.sim.life <= 0:
+			if m.id == shooter or m.sim.life <= 0 or Room.teammates(m.team, _team_of_id(shooter)):
 				continue
 			if not b.hits(m.sim.pos, m.sim.crash_radius):
 				continue
@@ -1203,7 +1404,8 @@ func _record_hit(victim_id: int, attacker_id: int, amount: int, remaining: int, 
 	victim.sim.life = remaining
 	if _netlog:
 		print("  hit %d -> %d: %d with %s, %d left" % [attacker_id, victim_id, amount, GameData.weapon(weapon_id).name, remaining])
-	if stats.has(attacker_id):
+	# Hitting a teammate (splash) earns no points; the kill still counts (kill_user_num).
+	if stats.has(attacker_id) and not Room.teammates(victim.team, _team_of_id(attacker_id)):
 		(stats[attacker_id] as Stats).damage += amount
 	if remaining > 0:
 		victim.view.play_damage()

@@ -26,36 +26,57 @@ tables (robots, weapons, parts, shop catalogue) and never player, clan, log or b
 
 Record a scripted demo: `godot --path godot --write-movie out.avi --fixed-fps 30 --quit-after 300 -- autopilot`
 
-## Two players
+## Multiplayer: up to 12, free-for-all or teams
 
-Start the game on two computers on the same network. One chooses **Host a match**, the
-other types the host's address into the box and chooses **Join**. The host's screen shows
-its address. You can skip the menu from the command line:
+Start the game on computers on the same network. One picks the mode (free-for-all or team
+battle) and chooses **Host a match**; the others type the host's address and choose
+**Join**. The host's screen shows its address and who is in. When everyone has joined, the
+host presses **Enter** to start. You can skip the menu from the command line:
 
 ```
 godot --path godot -- host                  # player 1, listens on port 7777
-godot --path godot -- join 192.168.1.20     # player 2, the host's address
+godot --path godot -- host teams            # the same, as a team battle
+godot --path godot -- join 192.168.1.20     # another player, with the host's address
 godot --path godot -- practice              # alone, against a target dummy
 ```
 
+- **Room** (`srv_rcroom.cpp`): 12 places, the host included. Players take the first free
+  slot in free-for-all. In team battle slots 1-6 are red and 7-12 blue, and a joiner goes
+  to the smaller side (red when level). Between rounds, **T** moves you to the first free
+  slot on the other side.
+- **Starting** (`page_game_room.lua`): needs two players, and equal sides in team battle.
+  Someone who joins mid-round sits out until the next round starts.
+- **Start points** (the server's `start_point` table): free-for-all draws from all 12 points,
+  red from points 1-6 and blue from 7-12, never two on one point. The blue draw leans to the
+  first blue point, as the server's did. Everyone starts facing 0 degrees: the server sent
+  no direction.
+- **Teammates** cannot hit each other directly: bullets, beams and swords pass through
+  them (`rc_bullet::is_crash` team check), lock-on and X-Mines ignore them. Splash still hurts
+  teammates and the shooter. Damage to a teammate earns no points; a kill still counts.
+- **After your mech is gone** the camera follows the next player still standing, by slot.
+- **Tab** shows every player's face, HP and name (`EnableUserViewInfo`), red on the left and
+  blue on the right in team battle.
 - macOS may ask whether Godot can accept incoming connections the first time you host.
-  Allow it, or player 2 cannot connect.
-- Two windows on one computer also connect, but only the window in front gets the keyboard
-  and mouse, so two people cannot play at once that way. It is useful for testing.
-- Player 1 is the Zeid's default blue and white. Player 2 uses its second original colour
-  scheme, dark grey and violet.
+  Allow it, or the others cannot connect.
+- Several windows on one computer also connect, but only the window in front gets the
+  keyboard and mouse. It is useful for testing.
+- Colour schemes go by slot, cycling the body's original three. The original took them
+  from each player's paint item, which this recreation does not have.
 - Esc leaves the match and returns to the menu.
 
 How it works, following the original client: each player runs their own mech and sends its
 state 60 times a second, tagged with the round so a late state from the last round cannot
-end the new one. Shots go out as events, so both screens show every bullet. The
+end the new one. The host keeps the slot list and sends it to everyone when it changes.
+Shots go out as events, so every screen shows every bullet. The
 player who is hit decides the damage (the SR-3's database setting), then reports it to
 everyone. Remote mechs glide toward their reported position the way the original eased toward
 `lastRealPos`.
 
 ## Match rules (from the original server and client)
 
-- Free-for-all, last mech standing (`GameRoom::is_game_end`, mode 0). No respawns.
+- Free-for-all: last mech standing. Team battle: last side standing (`GameRoom::is_game_end`).
+  No respawns. If nobody is left, everyone loses: there is no draw (`get_winners_team`).
+  In team battle the whole winning side wins, its fallen included.
 - HP is the body's armour points (700 for the Zeid). Each hit plays one of the two hit
   reactions unless the mech is mid-attack.
 - At 0 HP the mech stops and takes no input, and 0.1 s later it explodes into the original
@@ -64,13 +85,14 @@ everyone. Remote mechs glide toward their reported position the way the original
 - The match ends the moment one mech is left. The clock counts up from zero; there is no
   time limit.
 - Results show kills, damage dealt and points (damage / 10 x 0.825, the server's formula at
-  equal grades), plus rounds won this session.
+  equal grades, doubled in a free-for-all that started with three or more), plus rounds won
+  this session.
 - The next round starts automatically 6 seconds after the results. This part is the
   recreation's own: the original sent players back to a room lobby.
 
 ## Arenas (from `test_map.lua`, `rcmap.cpp` and the server)
 
-Pick the arena in the menu, or add `map=<id>` after `--`. The host's choice goes to player 2.
+Pick the arena in the menu, or add `map=<id>` after `--`. The host's choice goes to everyone who joins.
 
 | Map | id | Bounds (x, y) | Walls on the play plane |
 |---|---|---|---|
@@ -117,10 +139,12 @@ that and scaled to the window.
   no ammo limit.
 - Right: for 2 seconds after each hit you land, the target's face, name and energy bar
   (`ON_user_state_wnd`).
-- Radar (top right): dots at 0.08 scale within 1000 x 750 units. Every free-for-all player
-  is team 0, so every dot uses the same "ours" image, as in the original.
-- Off-screen players: a marker on a 180-pixel ring round the screen centre, the nearest
-  one with the brighter image. Names float over mechs on screen, in team 0 green.
+- Radar (top right): dots at 0.08 scale within 1000 x 750 units. The dot image goes by team,
+  not by side: red players use the "enermy" image (the original's spelling), everyone else
+  "ours", your own dot included.
+- Off-screen players: a marker on a 180-pixel ring round the screen centre: the friend image
+  for teammates, the brighter enemy image for the nearest enemy, the dim one for the rest.
+  Markers and the names floating over mechs are green in free-for-all, red or blue in teams.
 - Under 10% HP, the SPAttack warning pulses under your mech.
 - With a shield, the guard gauge rides under your mech (`guard_gage`, moved every frame by
   `updateguard`): HP, shield and bit bars, each easing to its new width over 0.5 s.
@@ -150,7 +174,8 @@ frames a second (run the window with `--max-fps 60 --always-on-top`, or it runs 
 stalls when covered). `--write-movie` records sound as well. For practice: `dummy_guard` has the
 target raise its guard whenever it can, `dummy_near=200` starts it that far in front of you.
 For the autopilot: `slot=4` keeps it on one weapon, `autoguard` guards 2 s in every 8, `combos`
-enters both command combos with a sword.
+enters both command combos with a sword. For hosting: `players=4` starts the match once four
+are in, `tab` keeps the Tab panel open.
 
 ## Controls (as in the original)
 
@@ -397,15 +422,14 @@ parts added to the base stats.
 - The results screen is this recreation's own panel, not the original's result page.
 - The original drew HUD text with its own bitmap font; Godot's default font stands in.
 - City's sky uses `mount01.png`, which is not in the archive, so that part draws untextured.
-- Starting facing is toward the arena centre. The original's start direction is not in the
-  source we have (inferred).
 - The original's bullet wall test cast its ray backward from the previous position, so it
   noticed a wall a frame late. Here the bullet stops on the frame it crosses.
 - When a mech touches several wall faces at once, the push uses the nearest one. The
   original used whichever its collision library reported first.
 - Light strengths are matched by eye; Direct3D's fixed-function lighting has no exact
   Godot equivalent.
-- Team mode, more than two players, NPCs, money and grades are not in yet.
+- NPCs, observers, money, grades and paint items are not in yet. Points leave out the
+  grade-based team averages and loser penalties, which need grades.
 - No lag compensation. Fine on a home network, untested over the internet.
 
 ## Layout
@@ -421,6 +445,7 @@ scripts/mech_view.gd     a body's model, retargeted clips, held weapons, the rot
 scripts/bullet.gd        projectile rounds: bullets, missiles, shells, arrows
 scripts/beam.gd          instant line weapons and their beams
 scripts/combat.gd        splash, stun, line-hit, guard and mine-target rules
+scripts/room.gd          room rules: slots, teams, start points, round end, winners
 scripts/game.gd          modes, networking, rounds, hits, camera, target dummy, autopilot
 scripts/battle_world.gd  scenery and effects: arena, sky, lights, booster flames, hits, wall crash, explosion
 scripts/battle_map.gd    an arena's bounds, start points, lights and the edge bounce
@@ -436,5 +461,5 @@ tools/inspect_import.gd     prints an imported model's tree and clips
 tools/render_poses.gd       renders the mech at several facings
 tools/render_map.gd         renders an arena from above with its walls, bounds and start points
 tools/extract_ui.py         reads the HUD window tables and particle scripts, copies their art
-tests/test_mech_sim.gd      182 checks against the original database values and rules
+tests/test_mech_sim.gd      199 checks against the original database values and rules
 ```

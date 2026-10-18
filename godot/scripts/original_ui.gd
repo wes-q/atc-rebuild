@@ -80,7 +80,7 @@ static func _build(node_name: String, d: Dictionary) -> OriginalUI:
 		var uv_list: Array = tex.get("uv_list", [])
 		for i in list.size():
 			win.textures.append(texture(str(list[i])))
-			if i < uv_list.size() and uv_list[i] is Array:
+			if i < uv_list.size() and uv_list[i] is Array and (uv_list[i] as Array).size() == 4:
 				var u: Array = uv_list[i]
 				win.uvs.append(Rect2(u[0], u[1], u[2] - u[0], u[3] - u[1]))
 			else:

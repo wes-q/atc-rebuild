@@ -39,6 +39,7 @@ What the archive contains: `docs/archive-inventory.md`.
 | 7 | The other four bodies | Done |
 | 8 | Shields and the slot-4 specials (EMP, Confusing Beam, X-Mine) | Done |
 | 9 | Sword command combos | Done |
+| 10 | Up to 12 players, free-for-all or red and blue teams | Done |
 
 ## History
 

@@ -1,7 +1,8 @@
 class_name StartMenu
 extends CanvasLayer
-## Practice, host or join, and the arena for practice or hosting (the joining player gets the
-## host's). Command-line arguments skip this: -- practice, -- host, -- join <ip>, map=<id>, body=<name>.
+## Practice, host or join, and the arena and mode for practice or hosting (the joining player
+## gets the host's). Command-line arguments skip this: -- practice, -- host, -- join <ip>,
+## map=<id>, body=<name>, teams.
 
 signal practice_chosen
 signal host_chosen
@@ -17,6 +18,9 @@ var map_id := "space"
 ## Body picked in the menu.
 var body_id := "zeid"
 var _body: OptionButton
+## The room's game type for hosting (page_custom_game game_type_select): team battle or not.
+var team_mode := false
+var _mode: OptionButton
 
 func _ready() -> void:
 	var shade := ColorRect.new()
@@ -68,8 +72,22 @@ func _ready() -> void:
 	body_row.add_child(_body)
 	select_body(body_id)
 
+	var mode_row := HBoxContainer.new()
+	box.add_child(mode_row)
+	var mode_label := Label.new()
+	mode_label.text = "Mode"
+	mode_label.custom_minimum_size = Vector2(60, 0)
+	mode_row.add_child(mode_label)
+	_mode = OptionButton.new()
+	_mode.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_mode.add_item("Free-for-all")
+	_mode.add_item("Team battle (red and blue)")
+	_mode.item_selected.connect(func(i: int) -> void: team_mode = i == 1)
+	mode_row.add_child(_mode)
+	select_mode(team_mode)
+
 	_button(box, "Practice against a target", func() -> void: practice_chosen.emit())
-	_button(box, "Host a match (player 1)", func() -> void: host_chosen.emit())
+	_button(box, "Host a match (up to 12 players)", func() -> void: host_chosen.emit())
 
 	var row := HBoxContainer.new()
 	box.add_child(row)
@@ -78,7 +96,7 @@ func _ready() -> void:
 	_address.placeholder_text = "host address"
 	_address.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_child(_address)
-	_button(row, "Join (player 2)", func() -> void: join_chosen.emit(_address.text.strip_edges()))
+	_button(row, "Join", func() -> void: join_chosen.emit(_address.text.strip_edges()))
 
 	_message = Label.new()
 	_message.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -96,6 +114,11 @@ func select_body(id: String) -> void:
 	body_id = id
 	if _body and id in Bodies.NAMES:
 		_body.select(Bodies.NAMES.find(id))
+
+func select_mode(teams: bool) -> void:
+	team_mode = teams
+	if _mode:
+		_mode.select(1 if teams else 0)
 
 func select_map(id: String) -> void:
 	map_id = id
