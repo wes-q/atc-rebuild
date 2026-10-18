@@ -7,6 +7,7 @@ Private recreation of ATC Raycrash (CodiNET, 2005) using its own rules and art. 
 ```
 brew install --cask godot        # 4.7.2
 brew install assimp              # 6.0.5, only for converting art
+brew install ffmpeg              # optional: cleans the original sound files' tags
 python3 -I godot/tools/convert_original.py "RaycrashArchive/extracted/source/ATC BIN/bin/data" godot/assets/original
 python3 -I godot/tools/extract_db.py RaycrashArchive/extracted/database/raycrash1 godot/assets/original/data
 python3 -I godot/tools/extract_ui.py "RaycrashArchive/extracted/source/ATC BIN/bin/data" godot/assets/original

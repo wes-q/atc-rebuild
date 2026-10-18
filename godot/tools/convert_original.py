@@ -398,13 +398,24 @@ def convert_maps(data_dir: pathlib.Path, out_dir: pathlib.Path) -> None:
     (out_dir / "map" / "maps.json").write_text(json.dumps(index, indent=1), encoding="utf-8")
 
 
+def copy_ogg(src: pathlib.Path, dst: pathlib.Path) -> None:
+    """The original encoder (Sonic Foundry OggVorbis Beta 3) wrote a malformed comment tag that
+    Godot warns about. ffmpeg remuxes the stream with a clean tag; the audio packets are
+    copied untouched. Without ffmpeg the file is copied as it is."""
+    if shutil.which("ffmpeg"):
+        subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", str(src), "-map", "0:a", "-c:a", "copy",
+                        "-map_metadata", "-1", str(dst)], check=True, capture_output=True)
+    else:
+        shutil.copyfile(src, dst)
+
+
 def copy_audio(bin_dir: pathlib.Path, out_dir: pathlib.Path) -> None:
     for rel in SOUNDS:
         name = rel if rel.lower().endswith(".ogg") else rel + ".ogg"
         src = find_case_insensitive(bin_dir, name)
         dst = out_dir / name.lower()
         dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(src, dst)
+        copy_ogg(src, dst)
     names: list[str | None] = []
     for rel in BGM_LIST:
         try:
@@ -415,7 +426,7 @@ def copy_audio(bin_dir: pathlib.Path, out_dir: pathlib.Path) -> None:
         dst = out_dir / "bgm" / src.name
         dst.parent.mkdir(parents=True, exist_ok=True)
         if not dst.exists():
-            shutil.copyfile(src, dst)
+            copy_ogg(src, dst)
         names.append(src.name)
     (out_dir / "bgm" / "bgm.json").write_text(json.dumps(names, ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"{len(SOUNDS)} sounds, {sum(n is not None for n in names)} of {len(names)} BGM entries")
