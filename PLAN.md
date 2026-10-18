@@ -40,6 +40,7 @@ What the archive contains: `docs/archive-inventory.md`.
 | 8 | Shields and the slot-4 specials (EMP, Confusing Beam, X-Mine) | Done |
 | 9 | Sword command combos | Done |
 | 10 | Up to 12 players, free-for-all or red and blue teams | Done |
+| 11 | Android: touch controls and an APK build | Done |
 
 ## History
 

@@ -83,6 +83,9 @@ var round_starters := 0
 var _watch_id := 0
 var _rng := RandomNumberGenerator.new()
 var hud: Hud
+## On-screen controls on a touch screen, or with the "touch" test option on a desktop.
+var touch: TouchControls
+var _touch_mode := DisplayServer.is_touchscreen_available() or OS.get_cmdline_user_args().has("touch")
 var sound: GameSound
 var menu: StartMenu
 var mechs: Dictionary = {} ## id -> Mech
@@ -153,6 +156,19 @@ func _ready() -> void:
 	if dummy_arg in Bodies.NAMES:
 		dummy_body = dummy_arg
 	hud = Hud.new()
+	if _touch_mode:
+		# The test option drives the touch controls with the mouse, one finger at a time.
+		if OS.get_cmdline_user_args().has("touch"):
+			Input.emulate_touch_from_mouse = true
+		touch = TouchControls.new()
+		touch.visible = false
+		add_child(touch)
+		touch.menu_pressed.connect(func() -> void:
+			_reset_world()
+			_show_menu(""))
+		touch.start_pressed.connect(_try_start)
+		touch.team_pressed.connect(_ask_change_team)
+		hud.touch_help = true
 	sound = GameSound.new()
 	add_child(sound)
 	sound.enabled = not OS.get_cmdline_user_args().has("mute")
@@ -207,8 +223,12 @@ func _show_menu(message: String) -> void:
 		menu.select_mode(team_mode)
 	menu.visible = true
 	menu.show_message(message)
+	if touch:
+		touch.visible = false
 
 func _hide_menu() -> void:
+	if touch:
+		touch.visible = true
 	if menu:
 		menu.visible = false
 		map_choice = menu.map_id
@@ -271,7 +291,7 @@ func start_practice() -> void:
 	local_id = 1
 	_spawn(local_id, 0, true, body_choice)
 	_spawn(DUMMY_ID, 1, false, dummy_body if dummy_body != "" else _random_other_body(body_choice))
-	_status = "Practice on %s. Esc: menu" % map.title
+	_status = "Practice on %s. %s: menu" % [map.title, _key("Esc", "MENU")]
 	_begin_round(1, map.id, _pick_spawns())
 
 func start_host() -> void:
@@ -336,24 +356,52 @@ func _lan_addresses() -> Array[String]:
 		out.append("127.0.0.1")
 	return out
 
+## Android's back button: out of a match to the menu, and from the menu out of the app.
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_WM_GO_BACK_REQUEST:
+		if mode != "":
+			_reset_world()
+			_show_menu("")
+		else:
+			get_tree().quit()
+
 func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("ui_cancel") and mode != "":
 		_reset_world()
 		_show_menu("")
 	# The host starts the match once everyone is in (the room master's start button).
-	if mode == "host" and round_number == 0 and Room.can_start(roster.values(), team_mode) and event is InputEventKey \
-			and event.pressed and not event.echo and (event as InputEventKey).keycode in [KEY_ENTER, KEY_KP_ENTER]:
-		_start_next_round()
-	if team_mode and _networked() and not round_active and event is InputEventKey and event.pressed \
-			and not event.echo and (event as InputEventKey).keycode == KEY_T:
-		if mode == "host":
-			_change_team(local_id)
-		else:
-			_net_change_team.rpc_id(1)
+	if event is InputEventKey and event.pressed and not event.echo and (event as InputEventKey).keycode in [KEY_ENTER, KEY_KP_ENTER]:
+		_try_start()
+	if event is InputEventKey and event.pressed and not event.echo and (event as InputEventKey).keycode == KEY_T:
+		_ask_change_team()
 	if event is InputEventKey and event.pressed and not event.echo and (event as InputEventKey).keycode == KEY_M:
 		sound.enabled = not sound.enabled
 		if not sound.enabled:
 			sound.stop_bgm()
+
+## The host's start: Enter, or START on a touch screen.
+func _can_start_now() -> bool:
+	return mode == "host" and round_number == 0 and Room.can_start(roster.values(), team_mode)
+
+func _try_start() -> void:
+	if _can_start_now():
+		_start_next_round()
+
+## T, or TEAM on a touch screen: move to the other side between rounds.
+func _can_change_team_now() -> bool:
+	return team_mode and _networked() and not round_active
+
+func _ask_change_team() -> void:
+	if not _can_change_team_now():
+		return
+	if mode == "host":
+		_change_team(local_id)
+	else:
+		_net_change_team.rpc_id(1)
+
+## A key's name in status lines, or its button on a touch screen.
+func _key(key_name: String, button: String) -> String:
+	return button if _touch_mode else key_name
 
 # --- Rounds -----------------------------------------------------------------------------
 
@@ -572,7 +620,7 @@ func _net_roster(list: Dictionary, number: int, active: bool, map_id: String, sp
 	_status = "You are player %d of %d%s.%s" % [int(roster[local_id]) + 1, roster.size(), _team_words(int(roster[local_id])),
 		" Waiting for the next round." if first and active else ""]
 	if team_mode and not round_active:
-		_status += " T: change team."
+		_status += " %s: change team." % _key("T", "TEAM")
 
 ## Slots and teams from the roster onto the mechs (a team change moves a slot).
 func _apply_slots() -> void:
@@ -630,13 +678,13 @@ func _host_status() -> void:
 		where += " Red %d, blue %d." % [red, roster.size() - red]
 	if round_number == 0:
 		if Room.can_start(roster.values(), team_mode):
-			where += " Enter: start the match."
+			where += " %s: start the match." % _key("Enter", "START")
 		elif roster.size() >= 2:
 			where += " Teams must be even to start."
 		else:
 			where += " Waiting for players."
 	if team_mode and not round_active:
-		where += " T: change team."
+		where += " %s: change team." % _key("T", "TEAM")
 	_status = where
 
 ## Owner's state, every physics tick. Unreliable: a newer one replaces a lost one.
@@ -911,7 +959,7 @@ func _physics_process(dt: float) -> void:
 		if m.local:
 			var can_act := round_active and m.sim.life > 0
 			var intent := _read_intent(m) if can_act else MechSim.Intent.new()
-			var lock_key := Input.is_physical_key_pressed(KEY_F) and can_act
+			var lock_key := (Input.is_physical_key_pressed(KEY_F) or (touch != null and touch.lock)) and can_act
 			_update_lock(m, lock_key and not _prev_lockon_key)
 			_prev_lockon_key = lock_key
 			# button_up_explosion: letting go sets off this mech's splash shells.
@@ -980,7 +1028,10 @@ func _process(dt: float) -> void:
 	hud.team_mode = team_mode
 	hud.my_team = me.team if me else Room.NONE
 	hud.board = board
-	hud.show_board = (Input.is_physical_key_pressed(KEY_TAB) or _hold_tab) and me != null
+	hud.show_board = (Input.is_physical_key_pressed(KEY_TAB) or _hold_tab or (touch != null and touch.players)) and me != null
+	if touch:
+		touch.show_start = _can_start_now()
+		touch.show_team = _can_change_team_now()
 	var nearest := _nearest_enemy(me) if me else null
 	hud.lock_target_pos = null
 	hud.lock_candidates.clear()
@@ -1054,6 +1105,8 @@ func _low_health_sparks(m: Mech, dt: float) -> void:
 func _read_intent(m: Mech) -> MechSim.Intent:
 	if _autopilot:
 		return _autopilot_intent(m)
+	if touch:
+		return _touch_intent(m)
 	var it := MechSim.Intent.new()
 	it.left = Input.is_action_pressed("move_left")
 	it.right = Input.is_action_pressed("move_right")
@@ -1067,6 +1120,27 @@ func _read_intent(m: Mech) -> MechSim.Intent:
 		if Input.is_physical_key_pressed(KEY_1 + k) or Input.is_physical_key_pressed(KEY_KP_1 + k):
 			it.weapon_key = k + 1
 	it.aim = _mouse_on_plane(m)
+	return it
+
+## The touch controls as the same keys and buttons. Weapons worked by holding the button get
+## a held trigger; the rest get clicks.
+func _touch_intent(m: Mech) -> MechSim.Intent:
+	var it := MechSim.Intent.new()
+	var k := touch.keys()
+	it.left = k["left"]
+	it.right = k["right"]
+	it.up = k["up"]
+	it.down = k["down"]
+	it.boost = k["boost"]
+	var w := m.sim.weapon
+	var hold := w.is_continuous or w.is_charge() or int(w.mode_num("button_up_explosion")) == 1
+	it.fire = touch.fire_held(hold)
+	it.guard = touch.guard
+	it.weapon_key = touch.weapon_key
+	var d := touch.plane_aim()
+	if d == Vector2.ZERO:
+		d = Original.vec2_from_deg(m.sim.facing)
+	it.aim = m.sim.pos + d * 300.0
 	return it
 
 ## rcPlayerManager::updaterotation: ray from the camera through the cursor onto the plane.

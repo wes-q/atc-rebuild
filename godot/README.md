@@ -192,6 +192,43 @@ are in, `tab` keeps the Tab panel open.
 | M | Sound and music on or off (this recreation's own) |
 | Esc | Leave the match |
 
+## Android (this recreation's own)
+
+The game runs on Android phones and tablets in landscape, with on-screen controls. A
+desktop Mac builds the APK; iPhone is not supported.
+
+Build once the toolchain is installed (Homebrew `openjdk@17` and `android-commandlinetools`,
+then `sdkmanager` for `platform-tools`, `build-tools;35.0.1` and `platforms;android-35` in
+`~/Library/Android/sdk`, and Godot's 4.7.2 export templates):
+
+```
+export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
+godot --headless --path godot --export-debug Android godot/export/atc-raycrash.apk
+```
+
+Install it on a phone with USB debugging on: `~/Library/Android/sdk/platform-tools/adb install -r godot/export/atc-raycrash.apk`.
+Or copy the file to the phone and open it (allow installs from that app when asked).
+The APK carries the converted CodiNET art and sound: it is for your own phones and friends'
+private play, never a store, and it is git-ignored like the art.
+
+**Touch controls** (`scripts/touch_controls.gd`):
+- **Left stick:** move along the screen axes in eight directions, like WASD. Pushed to the
+  rim it also boosts. The stick appears wherever your thumb lands on the left half.
+- **Right stick:** aim; the mech turns toward the drag. Pushed past a third of the way it
+  fires: held for the Heavy Machinegun, Plasma Shock Wave, Plasma Bow (let go to shoot) and
+  Cluster Cannon (let go to burst), about eight clicks a second for everything else.
+- **Buttons:** 1 to 4 for the weapon slots, GUARD, LOCK, PLAYERS (the Tab panel) and MENU.
+  Between rounds the host gets START and, in team battle, everyone gets TEAM.
+- **Command combos:** flick the left stick toward your facing, then fire; or away, toward,
+  fire. Each within 0.2 s, as on the keyboard.
+- Android's back button leaves a match for the menu, and quits from the menu.
+- Phones on the same Wi-Fi host and join each other, and play with desktops, exactly as on
+  the desktop.
+- The HUD keeps the original 4:3 layout in the middle of the screen; on a wide phone the
+  sticks and buttons sit beside it.
+
+Try the controls on a desktop with the mouse as one finger: `godot --path godot -- practice touch`.
+
 ## Bodies (from `rcPlayer.cpp`, `rcArmor.cpp`, `weapon_parameter.lua`, `character_mapping_parameter.lua`)
 
 Pick the body in the menu, or add `body=<zeid|redkite|gigas|deff|alicia>` after `--` (and
@@ -451,6 +488,7 @@ scripts/battle_world.gd  scenery and effects: arena, sky, lights, booster flames
 scripts/battle_map.gd    an arena's bounds, start points, lights and the edge bounce
 scripts/map_collision.gd wall triangles on a plane grid: sphere and segment tests
 scripts/start_menu.gd    practice, host and join menu
+scripts/touch_controls.gd on-screen sticks and buttons for phones
 scripts/hud.gd           the original battle HUD: dialogs, radar, markers, name tags
 scripts/original_ui.gd   the engine's UI windows, built from the exported Lua tables
 scripts/game_sound.gd    positioned sound effects and the BGM play list
@@ -461,5 +499,5 @@ tools/inspect_import.gd     prints an imported model's tree and clips
 tools/render_poses.gd       renders the mech at several facings
 tools/render_map.gd         renders an arena from above with its walls, bounds and start points
 tools/extract_ui.py         reads the HUD window tables and particle scripts, copies their art
-tests/test_mech_sim.gd      199 checks against the original database values and rules
+tests/test_mech_sim.gd      208 checks against the original database values and rules
 ```

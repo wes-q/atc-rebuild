@@ -49,6 +49,16 @@ var jam_time := 0.0
 var _gauge_w := {} ## bar name -> shown width, easing to the target
 var overlay: Node2D
 
+## On a touch screen the help line describes the on-screen controls instead of the keys.
+var touch_help := false:
+	set(v):
+		touch_help = v
+		if _help:
+			_help.text = TOUCH_HELP if v else KEY_HELP
+			# The buttons carry their own labels; the line would sit over the right stick.
+			_help.visible = not v
+const KEY_HELP := "WASD: move   Mouse: aim   Left: fire   Right: boost   Space: guard   Tab: players   +/-: camera   M: sound   Esc: menu"
+const TOUCH_HELP := "Left stick: move, rim boosts   Right stick: aim, push to fire   Combo: flick toward your facing, then fire"
 var _status: Label
 var _help: Label
 var _result: Control
@@ -89,7 +99,8 @@ func _ready() -> void:
 	_status.position.y -= 44
 	_status.position.x -= 12
 	_help = _label(12, Color(0.65, 0.7, 0.8))
-	_help.text = "WASD: move   Mouse: aim   Left: fire   Right: boost   Space: guard   Tab: players   +/-: camera   M: sound   Esc: menu"
+	_help.text = TOUCH_HELP if touch_help else KEY_HELP
+	_help.visible = not touch_help
 	_help.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_RIGHT)
 	_help.grow_horizontal = Control.GROW_DIRECTION_BEGIN
 	_help.position.y -= 22

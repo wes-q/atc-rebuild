@@ -6,3 +6,7 @@ dist/
 # Private material: the RageZone archive, recorded clips, converted original art
 RaycrashArchive/
 clips/
+# Android builds carry the converted art: never commit them
+*.apk
+*.aab
+*.idsig

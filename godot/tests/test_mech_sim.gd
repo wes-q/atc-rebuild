@@ -58,6 +58,7 @@ func _init() -> void:
 	test_room_slots()
 	test_room_start_points()
 	test_room_end_and_winners()
+	test_touch_controls()
 	print("\n%d passed, %d failed" % [passed, failures])
 	quit(1 if failures > 0 else 0)
 
@@ -966,3 +967,62 @@ func test_room_end_and_winners() -> void:
 	check(Room.winning_slots([0, 1, 6, 7], [1], true) == [0, 1], "the side still standing wins, its fallen included")
 	check(Room.winning_slots([0, 6], [], true).is_empty() and Room.winning_slots([0, 3], [], false).is_empty(), "nobody left: everyone loses, no draw")
 	check(Room.winning_slots([0, 3, 4], [4], false) == [4], "free-for-all: the survivor")
+
+func _touch(tc: TouchControls, index: int, at: Vector2, pressed: bool) -> void:
+	var e := InputEventScreenTouch.new()
+	e.index = index
+	e.position = at
+	e.pressed = pressed
+	tc._input(e)
+
+func _drag(tc: TouchControls, index: int, at: Vector2) -> void:
+	var e := InputEventScreenDrag.new()
+	e.index = index
+	e.position = at
+	tc._input(e)
+
+func test_touch_controls() -> void:
+	print("touch controls")
+	var tc := TouchControls.new()
+	root.add_child(tc)
+	# The tree is not running inside _init, so _ready has not happened yet.
+	if tc._pad == null:
+		tc._ready()
+	tc._pad.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	tc._pad.size = Vector2(1600, 720)
+	tc.visible = true
+	_touch(tc, 0, Vector2(150, 560), true)
+	_drag(tc, 0, Vector2(190, 560))
+	var k := tc.keys()
+	check(k.right and not k.left and not k.up and not k.boost, "left stick half right: walk right")
+	_drag(tc, 0, Vector2(240, 480))
+	k = tc.keys()
+	check(k.right and k.up and k.boost, "pushed to the rim up and right: diagonal with boost")
+	_drag(tc, 0, Vector2(160, 560))
+	check(not tc.keys().right and not tc.keys().boost, "inside the dead zone: nothing")
+	_touch(tc, 0, Vector2(160, 560), false)
+	_touch(tc, 1, Vector2(1300, 560), true)
+	_drag(tc, 1, Vector2(1300, 540))
+	check(tc.plane_aim().is_equal_approx(Vector2(0, 1)) and not tc.firing, "a short drag up aims up the plane without firing")
+	_drag(tc, 1, Vector2(1300, 480))
+	check(tc.firing and tc.fire_held(true), "past a third: fires, held for hold weapons")
+	var clicks := 0
+	var last := false
+	for i in 60:
+		tc._process(1.0 / 60.0)
+		var f := tc.fire_held(false)
+		if f and not last:
+			clicks += 1
+		last = f
+	check(clicks >= 7 and clicks <= 9, "click weapons get about eight presses a second (%d)" % clicks)
+	_touch(tc, 1, Vector2(1300, 480), false)
+	check(not tc.firing and tc.plane_aim().is_equal_approx(Vector2(0, 1)), "letting go stops firing and keeps the aim")
+	var two: Vector2 = tc._buttons().filter(func(b: Array) -> bool: return b[0] == "2")[0][1]
+	_touch(tc, 2, two, true)
+	check(tc.weapon_key == 2, "button 2 holds weapon key 2")
+	_touch(tc, 2, two, false)
+	var guard_at: Vector2 = tc._buttons().filter(func(b: Array) -> bool: return b[0] == "GUARD")[0][1]
+	_touch(tc, 3, guard_at, true)
+	check(tc.guard and tc.weapon_key == 0, "GUARD holds the guard key")
+	_touch(tc, 3, guard_at, false)
+	tc.free()

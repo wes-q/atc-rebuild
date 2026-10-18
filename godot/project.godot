@@ -9,6 +9,8 @@ config/name="ATC Raycrash"
 config/description="Private recreation of ATC Raycrash (CodiNET, 2005) using the original rules and art."
 run/main_scene="res://scenes/main.tscn"
 config/features=PackedStringArray("4.7", "GL Compatibility")
+; Android's back button leaves a match for the menu instead of quitting (game.gd).
+config/quit_on_go_back=false
 
 [display]
 
@@ -17,6 +19,8 @@ window/size/viewport_width=1024
 window/size/viewport_height=768
 window/stretch/mode="canvas_items"
 window/stretch/aspect="expand"
+; Phones: landscape either way up.
+window/handheld/orientation=4
 
 [input]
 
@@ -69,4 +73,6 @@ zoom_out={
 
 renderer/rendering_method="gl_compatibility"
 renderer/rendering_method.mobile="gl_compatibility"
+; Android needs the mobile texture formats alongside the desktop ones.
+textures/vram_compression/import_etc2_astc=true
 environment/defaults/default_clear_color=Color(0.02, 0.03, 0.06, 1)
