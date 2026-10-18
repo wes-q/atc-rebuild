@@ -121,6 +121,7 @@ func _init(body_name := "zeid", weapons: Array = []) -> void:
 func _import_clips(lib: AnimationLibrary, path: String, prefix: String) -> void:
 	var src := (load(path) as PackedScene).instantiate()
 	var src_player := src.find_children("*", "AnimationPlayer", true, false)[0] as AnimationPlayer
+	var count := src_player.get_animation_list().size()
 	for clip_name in src_player.get_animation_list():
 		var clip := src_player.get_animation(clip_name).duplicate() as Animation
 		for t in range(clip.get_track_count() - 1, -1, -1):
@@ -134,7 +135,8 @@ func _import_clips(lib: AnimationLibrary, path: String, prefix: String) -> void:
 				clip.remove_track(t)
 				continue
 			clip.track_set_path(t, NodePath(str(model.get_path_to(target)) + ":" + str(p.get_concatenated_subnames())))
-		lib.add_animation(prefix + clip_name.trim_prefix("anim_"), clip)
+		# Named by the original's index, the file's turned around (Bodies.clip_index).
+		lib.add_animation(prefix + str(Bodies.clip_index(int(clip_name.trim_prefix("anim_")), count)), clip)
 	src.free()
 
 ## Sets position and the original's facing transform.

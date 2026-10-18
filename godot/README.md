@@ -442,6 +442,12 @@ Default loadouts (the client's `default_item_info`; the server's `InitEquipItemB
   - Alicia's bow is in her left hand with an arrow in the right.
   - Deff's head beam leaves from `head_dum`.
 - **Damage clips:** each body has its own; Alicia uses Deff's.
+- **Clip order:** the engine plays a file's clips by index through Direct3D's animation
+  controller (`Character::anim_play`, `GetAnimationSet(index)`), which holds them last first,
+  so the original's clip 0 is a file's last. Every index here follows that: in a weapon's
+  file 0 is the draw, 1 the stance held while standing (the clip with no motion in every
+  file), 2 and up the attacks; in a move file each move state's clip counts from the end.
+  Before this was found, swords stood in a swing, which looped.
 - **Colour schemes:** two alternate schemes per body.
 - **Clips only turn and scale parts.** The original puts every part's position back to the
   model's own after each clip step (`Character::update_frame_pos`). Alicia's clips were made
@@ -558,7 +564,8 @@ own numbers.
 - **Energy:** each bullet or swing spends the weapon's `cost_energy` from the boost gauge:
   20 per SR-3 bullet, 18 per dagger swing, nothing for missiles.
 - **Dagger:** a click swings at once; clicks during a swing queue the next, up to three
-  (clips 2, 3, 4 of `anim03/Dagger.x`), each starting when the last ends. A swing can land
+  (clips 2, 3, 4 of `anim03/Dagger.x` in the original's order, below), each starting when
+  the last ends. A swing can land
   from 0.3 s until 0.4 s after it starts, on the first mech within 59.4 units and inside a
   45-degree arc ahead, for 42 damage. The attacker's machine decides (`collision_checker`
   1). The 0.7 s cooldown runs after the whole combo. The blade leaves the original trail
@@ -699,7 +706,7 @@ server packed them and the client unpacked them. `scripts/game_data.gd` does the
 | Gauge | 1900, drain 140, recovery 110, low line 330 | same, per second |
 | Turn rate | 320 | 320 deg/s |
 | Armour points | 700 | 700 |
-| SR-3 | 3 shots, 100 ms apart, speed 1600, life 700, reload 1200, damage 12, energy 20 | 3 shots 0.1 s apart, 528 units/s, 0.7 s, 1.2 s reload after the 0.5 s fire animation, 12 damage, 20 gauge per shot |
+| SR-3 | 3 shots, 100 ms apart, speed 1600, life 700, reload 1200, damage 12, energy 20 | 3 shots 0.1 s apart, 528 units/s, 0.7 s, 1.2 s reload after the burst (the fire animation, 0.17 s, ends inside it), 12 damage, 20 gauge per shot |
 | Dagger Type 1 | area 180, arc 45, life 450, reload 700, damage 42, energy 18 | 59.4 units, 45 degrees, lands 0.3 to 0.4 s, 0.7 s after a combo, 42 damage, 18 per swing |
 | MML Type 1 | 3 shots, 300 ms apart, speed 1600, life 1750, reload 3500, damage 26, ammo 120, guided 100 | 3 missiles 0.3 s apart, 528 units/s, 1.7 s, 3.5 s reload, 26 damage, 120 ammo, homing |
 
@@ -721,8 +728,8 @@ parts added to the base stats.
   here is the hit mech's machine alone.
 - One `WeaponInfo` column could not be named from the backup's metadata. The server's own query
   identifies it as `continuous_time`, the gap between shots.
-- The fire animation length (0.5 s) comes from the converted clip; the original playback rate
-  of `.x` animations is assumed to match.
+- Clip lengths come from the converted clips; the original playback rate of `.x` animations
+  is assumed to match.
 - A shield is whole again each round. The original set durability only when the player was
   created, and each of its matches was a new game (inferred).
 - The guard break's own clip (`PLAYERANIM_ETC` clip 1) is not identified; the break shows

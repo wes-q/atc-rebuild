@@ -233,7 +233,9 @@ func test_rifle_burst_and_recharge() -> void:
 	check(shots.size() >= 6, "fires repeated bursts (%d shots in 4 s)" % shots.size())
 	check(near(shots[0], 0.1, 0.02), "first shot after one 0.1 s interval, as queued (%.2f s)" % shots[0])
 	check(near(shots[1] - shots[0], 0.1, 0.02) and near(shots[2] - shots[1], 0.1, 0.02), "burst shots are 0.1 s apart")
-	check(near(shots[3] - shots[0], 1.7, 0.05), "next burst after the 0.5 s fire animation plus 1.2 s reload (%.2f s)" % (shots[3] - shots[0]))
+	# The fire clip (0.17 s, the attack file's first clip, which is the original's clip 2) ends
+	# inside the 0.3 s burst, so the reload runs from the burst's end.
+	check(near(shots[3] - shots[0], 1.5, 0.05), "next burst after the burst plus the 1.2 s reload (%.2f s)" % (shots[3] - shots[0]))
 
 func test_move_clips() -> void:
 	print("animation choice")

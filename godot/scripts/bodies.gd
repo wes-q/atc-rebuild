@@ -72,10 +72,18 @@ static func scene_path(rel: String) -> String:
 	var p := ROOT + x_name(rel) + ".gltf"
 	return p if ResourceLoader.exists(p) else ""
 
-## Clip lengths of a converted model file, in clip order.
+## D3DX registers a file's animation sets last first, and the engine plays them by that index
+## (Character::anim_play, GetAnimationSet(index)): the original's clip 0 is the file's last.
+## The converter keeps file order, so every clip index here is turned around.
+static func clip_index(file_index: int, count: int) -> int:
+	return count - 1 - file_index
+
+## Clip lengths of a converted model file, in the original's clip order (clip_index).
 static func clip_lengths(rel: String) -> Array:
 	_load()
-	return _clips.get(x_name(rel), [])
+	var lengths: Array = _clips.get(x_name(rel), []).duplicate()
+	lengths.reverse()
+	return lengths
 
 static func face(body: String) -> int:
 	return NAMES.find(body) + 1
