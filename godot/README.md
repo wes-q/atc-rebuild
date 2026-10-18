@@ -339,7 +339,7 @@ then `sdkmanager` for `platform-tools`, `build-tools;35.0.1` and `platforms;andr
 
 ```
 export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
-godot --headless --path godot --export-debug Android godot/export/atc-raycrash.apk
+godot --headless --path godot --export-debug Android export/atc-raycrash.apk   # the path is inside the project
 ```
 
 Install it on a phone with USB debugging on: `~/Library/Android/sdk/platform-tools/adb install -r godot/export/atc-raycrash.apk`.
