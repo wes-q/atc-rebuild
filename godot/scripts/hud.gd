@@ -35,6 +35,10 @@ var self_state: OriginalUI
 var user_state: OriginalUI
 var focus: OriginalUI
 var radar: OriginalUI
+var guard_gage: OriginalUI
+## Radar::hide_time: an EMP hit blanks the enemy blips, edge markers and lock-on marks.
+var jam_time := 0.0
+var _gauge_w := {} ## bar name -> shown width, easing to the target
 var overlay: Node2D
 
 var _status: Label
@@ -77,7 +81,7 @@ func _ready() -> void:
 	_status.position.y -= 44
 	_status.position.x -= 12
 	_help = _label(12, Color(0.65, 0.7, 0.8))
-	_help.text = "WASD: move   Mouse: aim   Left: fire   Right: boost   +/-: camera   M: sound   Esc: menu"
+	_help.text = "WASD: move   Mouse: aim   Left: fire   Right: boost   Space: guard   +/-: camera   M: sound   Esc: menu"
 	_help.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_RIGHT)
 	_help.grow_horizontal = Control.GROW_DIRECTION_BEGIN
 	_help.position.y -= 22
@@ -95,8 +99,9 @@ func _build_original() -> void:
 	booster = OriginalUI.create("res_dlg_game_fight_booster_base")
 	user_state = OriginalUI.create("res_dlg_game_fight_user_state")
 	self_state = OriginalUI.create("res_dlg_game_fight_self_user_state")
+	guard_gage = OriginalUI.create_child("res_dlg_game_fight_background", "guard_gage")
 	# Added in create()'s order, then sorted by order (weapon, user_state and focus are 0).
-	for d in [weapon, user_state, focus, self_state, radar, playtime, booster]:
+	for d in [guard_gage, weapon, user_state, focus, self_state, radar, playtime, booster]:
 		screen.add_child(d)
 	user_state.visible = false
 	playtime.pos_set(334, 10)
@@ -140,6 +145,9 @@ func refresh(sim: MechSim, me_name: String, status: String, round_time: float, c
 	for d in [booster, playtime, weapon, self_state, focus, radar]:
 		if d:
 			d.visible = show_battle
+	if guard_gage:
+		guard_gage.visible = show_battle and sim.shield != null and not sim.is_dead_complete
+	jam_time = maxf(0.0, jam_time - dt) if show_battle else 0.0
 	if not show_battle:
 		if user_state:
 			user_state.visible = false
@@ -180,6 +188,11 @@ func refresh(sim: MechSim, me_name: String, status: String, round_time: float, c
 	var slot: MechSim.Slot = sim.slots[sim.weapon_index]
 	weapon_number_show(maxi(0, slot.ammo))
 	weapon_full_number_show(maxi(0, slot.data.ammo))
+	if guard_gage.visible:
+		# rcPlayerManager::updateguard every frame: the gauge under your mech, 80 x 0.3 + 5
+		# units down the plane and 40 pixels left (the name sits the same distance up).
+		var at := _to_screen(sim.pos, -(80.0 * Original.SCALE + 5.0))
+		guard_gage_update(sim.durability / sim.shield_max, float(maxi(0, sim.life)) / float(sim.life_max), 0.0, at.x - 40.0, at.y, dt)
 	if _user_state_time > 0.0:
 		_user_state_time -= dt
 		if _user_state_time <= 0.0:
@@ -189,6 +202,20 @@ func refresh(sim: MechSim, me_name: String, status: String, round_time: float, c
 	if _spattack_alpha < 0.0:
 		_spattack_alpha = 255.0
 	overlay.queue_redraw()
+
+## ONguard_gageUpdate(guard_gage, hp_gage, bit_gage, x, y): each bar 65 x value wide, eased
+## over 0.5 s (animate_scale; the easing curve is inferred as linear).
+func guard_gage_update(guard: float, hp: float, bit: float, x: float, y: float, dt: float) -> void:
+	guard_gage.pos_set(x, y)
+	var values := {"guard": guard, "hp": hp, "bit": bit}
+	for bar: String in values:
+		var target := 65.0 * clampf(values[bar], 0.0, 1.0)
+		var cur: float = _gauge_w.get(bar, target)
+		cur = move_toward(cur, target, maxf(absf(target - cur), 1.0) / 0.5 * dt)
+		_gauge_w[bar] = cur
+		var win := guard_gage.w(bar)
+		if win:
+			win.size_set(cur, 3)
 
 ## OnTimeUpdate: the clock in hundredths, digit by digit. The last-but-one digit wraps at 6,
 ## as in the original script, so the hundredths read 00..59 in steps of ten.
@@ -328,7 +355,7 @@ func _draw_overlay() -> void:
 		if not t.alive:
 			continue
 		var rel := Vector2(t.pos.x - _me.x, -(t.pos.y - _me.y)) * RADAR_SCALE
-		if absf(rel.x) <= RADAR_HALF.x and absf(rel.y) <= RADAR_HALF.y and ours:
+		if jam_time <= 0.0 and absf(rel.x) <= RADAR_HALF.x and absf(rel.y) <= RADAR_HALF.y and ours:
 			overlay.draw_texture_rect(ours, Rect2(RADAR_POS + rel, Vector2(5, 5)), false)
 		var on_screen := _to_screen(t.pos)
 		var inside := on_screen.x >= 0 and on_screen.x <= SCREEN.x and on_screen.y >= 0 and on_screen.y <= SCREEN.y
@@ -337,7 +364,7 @@ func _draw_overlay() -> void:
 			var at := _to_screen(t.pos, 105.0 * Original.SCALE + 5.0) + Vector2(-40, 0)
 			overlay.draw_string_outline(font, at, t.name, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, 3, Color(0, 0, 0, 0.9))
 			overlay.draw_string(font, at, t.name, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, TEAM0_COLOR)
-		else:
+		elif jam_time <= 0.0:
 			# get_position_on_hood: a marker on a 180-pixel ring, moved only past 5 pixels.
 			var slope := atan2(t.pos.y - _me.y, t.pos.x - _me.x)
 			var hp := HOOD_CENTRE + Vector2(cos(slope), -sin(slope)) * HOOD_RANGE
@@ -349,7 +376,18 @@ func _draw_overlay() -> void:
 				overlay.draw_set_transform(t.hood_pos + Vector2(5, 5), -slope)
 				overlay.draw_texture_rect(tex, Rect2(Vector2(-5, -5), Vector2(10, 10)), false, TEAM0_COLOR)
 				overlay.draw_set_transform(Vector2.ZERO)
-	# Lock-on markers.
+	# Lock-on markers, hidden while jammed (render_lock_on_system); lock-on still works.
+	if jam_time <= 0.0:
+		_draw_lock_marks()
+	# Under 10% life, SPAttack.png pulses below your mech.
+	if _me_low and _me_alive:
+		var warn := OriginalUI.texture("ui2/game_fight/spattack.png")
+		if warn:
+			var at := _to_screen(_me, -(80.0 * Original.SCALE + 5.0)) + Vector2(-70, 25)
+			overlay.draw_texture(warn, at, Color(1, 1, 1, _spattack_alpha / 255.0))
+
+## Lock-on: locked by an enemy, your target (and its edge mark), the candidates.
+func _draw_lock_marks() -> void:
 	if locked_on_me:
 		var locked := OriginalUI.texture("ui/widget/game_fight/rader/fughtui_locked.png")
 		if locked:
@@ -369,12 +407,6 @@ func _draw_overlay() -> void:
 	if locking:
 		for c in lock_candidates:
 			overlay.draw_texture_rect(locking, Rect2(_to_screen(c) - Vector2(44, 37), Vector2(88, 74)), false)
-	# Under 10% life, SPAttack.png pulses below your mech.
-	if _me_low and _me_alive:
-		var warn := OriginalUI.texture("ui2/game_fight/spattack.png")
-		if warn:
-			var at := _to_screen(_me, -(80.0 * Original.SCALE + 5.0)) + Vector2(-70, 25)
-			overlay.draw_texture(warn, at, Color(1, 1, 1, _spattack_alpha / 255.0))
 
 # --- Results (this recreation's own panel) --------------------------------------------------
 

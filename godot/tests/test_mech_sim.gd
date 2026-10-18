@@ -44,6 +44,13 @@ func _init() -> void:
 	test_splash_rules()
 	test_beam_rules()
 	test_stun()
+	test_shields()
+	test_guard_toggle()
+	test_guard_blocks_and_breaks()
+	test_confusion()
+	test_emp()
+	test_mine_firing()
+	test_mine_cycle()
 	print("\n%d passed, %d failed" % [passed, failures])
 	quit(1 if failures > 0 else 0)
 
@@ -427,13 +434,13 @@ func test_weapon_switching() -> void:
 	sim.step(it, DT)
 	it.weapon_key = 4
 	sim.step(it, DT)
-	check(sim.weapon_index == 0, "key 4, the shield, is not usable yet")
+	check(sim.weapon_index == 3 and sim.weapon.name == "EMP Shock Gun", "key 4 takes the EMP Shock Gun (the shield is not a slot)")
 	it.weapon_key = 0
 	sim.step(it, DT)
 	it.weapon_key = 3
 	it.fire = true
 	sim.step(it, DT)
-	check(sim.weapon_index == 0, "no change while the fire button is held")
+	check(sim.weapon_index == 3, "no change while the fire button is held")
 	it.fire = false
 	it.weapon_key = 0
 	run(sim, it, 1.0)
@@ -617,3 +624,180 @@ func test_stun() -> void:
 	sim.fired.connect(func(_o: Vector2, _d: int) -> void: shots[0] += 1)
 	run(sim, it, 1.0)
 	check(sim.pos == Vector2.ZERO and shots[0] == 0, "no moving or firing while stunned")
+
+func test_shields() -> void:
+	print("shields (Armor::init, rc_Weapon::init)")
+	var want := {"zeid": [2, 350.0], "redkite": [16, 450.0], "gigas": [9, 500.0], "deff": [15, 400.0], "alicia": [22, 300.0]}
+	var ok := true
+	for body: String in want:
+		var sim := MechSim.new(body)
+		ok = ok and sim.shield != null and sim.shield.id == want[body][0] and sim.shield_max == want[body][1] and sim.durability == sim.shield_max
+		ok = ok and near(sim.shield_recover, 7.0) and not Bodies.loadout(body).has(sim.shield.id)
+	check(ok, "each body's shield out of the slots, durability x 10 (350, 450, 500, 400, 300), recovers 7 a second")
+	check(Combat.guard_rule(1) == Combat.Guard.BLOCK and Combat.guard_rule(2) == Combat.Guard.BLOCK and Combat.guard_rule(3) == Combat.Guard.THROUGH and Combat.guard_rule(4) == Combat.Guard.SPLASH, "swords and bullets blocked, pierce goes through, splash keeps its splash part")
+
+func test_guard_toggle() -> void:
+	print("guard toggle (updateguard)")
+	var sim := MechSim.new()
+	var changes: Array[bool] = []
+	sim.guard_changed.connect(func(on: bool) -> void: changes.append(on))
+	var it := MechSim.Intent.new()
+	it.guard = true
+	run(sim, it, 0.5)
+	check(sim.guarding and changes == [true], "Space raises the guard once, holding it does nothing more")
+	it.guard = false
+	run(sim, it, 0.1)
+	check(sim.guarding, "letting go of Space keeps it up")
+	var shots := [0]
+	var clicks := [0]
+	sim.fired.connect(func(_o: Vector2, _d: int) -> void: shots[0] += 1)
+	sim.shield_clicked.connect(func() -> void: clicks[0] += 1)
+	it.fire = true
+	run(sim, it, 0.5)
+	it.fire = false
+	sim.step(it, DT)
+	check(shots[0] == 0 and clicks[0] == 1, "no firing while guarding; a click sounds shieldused")
+	it.right = true
+	run(sim, it, 0.5)
+	check(sim.pos.x > 50.0, "moves at full speed while guarding (%.0f in 0.5 s)" % sim.pos.x)
+	it.right = false
+	it.guard = true
+	sim.step(it, DT)
+	check(not sim.guarding and changes == [true, false], "Space again lowers it")
+	it.guard = false
+	sim.step(it, DT)
+	it.guard = true
+	sim.step(it, DT)
+	it.guard = false
+	it.weapon_key = 1
+	sim.step(it, DT)
+	check(not sim.guarding and sim.weapon_index == 0, "a weapon key drops the guard and changes weapon")
+	it.weapon_key = 0
+	it.guard = true
+	sim.step(it, DT)
+	check(sim.snapshot()[14] == 1, "the guard goes out with the state")
+	var remote := MechSim.new()
+	remote.apply_snapshot(sim.snapshot())
+	check(remote.guarding, "and a remote copy shows it")
+
+func test_guard_blocks_and_breaks() -> void:
+	print("guard blocks (World::process_crash, receive_guard)")
+	var sim := MechSim.new()
+	sim.facing = 0
+	var it := MechSim.Intent.new()
+	it.aim = Vector2(100, 0)
+	check(not sim.guards_against(Vector2(100, 0)), "no block without the guard up")
+	it.guard = true
+	sim.step(it, DT)
+	it.guard = false
+	check(sim.guards_against(Vector2(100, 0)) and sim.guards_against(Vector2(100, 400)), "blocks from ahead, up to dot 0.2 (about 78 degrees)")
+	check(not sim.guards_against(Vector2(10, 100)) and not sim.guards_against(Vector2(-100, 0)), "not from the side or behind")
+	check(not sim.block(100) and near(sim.durability, 250.0), "a blocked 100 wears 100 off 350")
+	run(sim, it, 1.0)
+	check(near(sim.durability, 250.0), "no recovery while guarding")
+	it.guard = true
+	sim.step(it, DT)
+	it.guard = false
+	run(sim, it, 1.0)
+	check(near(sim.durability, 257.0, 0.2), "7 a second back with the guard down (%.1f)" % sim.durability)
+	it.guard = true
+	sim.step(it, DT)
+	it.guard = false
+	check(sim.guarding and sim.block(300) and sim.durability == 0.0 and not sim.guarding, "a bigger hit breaks it and drops the guard")
+	run(sim, it, 5.0)
+	it.guard = true
+	sim.step(it, DT)
+	check(sim.durability == 0.0 and not sim.guarding, "a broken shield stays broken (shield_regeneration 0)")
+	sim.reset_at(Vector2.ZERO, 0)
+	check(sim.durability == 350.0, "whole again next round")
+
+func test_confusion() -> void:
+	print("Confusing Beam (ConfusionState, MoveState, TurnState)")
+	var w := GameData.weapon(18)
+	check(w.weapon_type == 2 and w.damage == 5 and w.state_action_type == 5 and near(w.bullet_speed, 528.0), "a normal bullet, 5 damage, 528 a second")
+	var sim := MechSim.new()
+	sim.confuse(w)
+	var it := MechSim.Intent.new()
+	it.right = true
+	it.aim = Vector2(1000, 0)
+	run(sim, it, 1.0)
+	check(near(sim.speed(), sim.move_speed * 0.7), "walks at 0.7 (%.0f of %.0f)" % [sim.speed(), sim.move_speed])
+	check(near(sim.damage_mul, 0.7) and near(sim.turn_mul, 0.7), "deals 0.7 of its damage and turns at 0.7")
+	var shots: Array[float] = []
+	var t := [0.0]
+	sim.fired.connect(func(_o: Vector2, _d: int) -> void: shots.append(t[0]))
+	it.right = false
+	it.fire = true
+	for i in 90:
+		t[0] += DT
+		sim.step(it, DT)
+		it.fire = false
+	var due := sim.weapon.fire_interval + 0.8 + DT
+	check(shots.size() == 1 and near(shots[0], due, 0.03), "the SR-3 shot leaves 0.8 s after its usual %.1f s (%s)" % [sim.weapon.fire_interval, str(shots)])
+	sim.confuse(w)
+	run(sim, it, 7.9)
+	check(sim.is_confused(), "a new hit restarts the 8 s")
+	run(sim, it, 0.2)
+	check(not sim.is_confused() and sim.move_mul == 1.0 and sim.fire_delay == 0.0, "then it wears off")
+
+func test_emp() -> void:
+	print("EMP Shock Gun")
+	var w := GameData.weapon(17)
+	check(w.is_splash() and near(w.splash_area, 66.0) and w.mode_num("splash_damage") == 0.0 and w.damage == 20, "splash 66 units, splash_damage 0, damage 20")
+	check(Combat.splash_direct(0, 20, 66, 5) == 24 and Combat.splash_direct(0, 20, 66, 30) == 20, "direct hit 24 close in, else 20")
+	check(Combat.splash_falloff(0, 66, 10) == 0 and w.mode_num("jamming_time") == 12.0, "bystanders take 0, but any hit jams the radar 12 s")
+	check(Combat.splash_direct(0, int(20 * w.mode_num("splash_ratio")), 66, 30) == 0, "a guard facing it leaves 0 (splash_ratio 0)")
+
+func test_mine_firing() -> void:
+	print("X-Mine firing")
+	var w := GameData.weapon(19)
+	check(w.is_mine() and not w.is_guided() and near(w.bullet_speed, 429.0) and near(w.life, 20.0) and near(w.splash_area, 66.0), "429 a second, 20 s, splash 66, no lock-on")
+	var sim := MechSim.new("gigas")
+	check(sim.slots[3].data.id == 19, "Gigas slot 4")
+	var it := MechSim.Intent.new()
+	it.weapon_key = 4
+	run(sim, it, 1.0)
+	it.weapon_key = 0
+	var times: Array[float] = []
+	var t := [0.0]
+	sim.fired.connect(func(_o: Vector2, _d: int) -> void: times.append(t[0]))
+	it.fire = true
+	for i in 120:
+		t[0] += DT
+		sim.step(it, DT)
+		it.fire = false
+	check(times.size() == 2 and near(times[0], 0.5 + DT, 0.03) and near(times[1], 1.0 + DT, 0.03), "two mines, 0.5 s and 1 s after the click (%s)" % str(times))
+
+func test_mine_cycle() -> void:
+	print("X-Mine cycle (rc_bullet::update, is_stop)")
+	var w := GameData.weapon(19)
+	var owner := MechSim.new("gigas")
+	var enemy := MechSim.new()
+	enemy.pos = Vector2(1000, 0)
+	var b := Bullet.new()
+	b.setup(Vector2.ZERO, 0, owner, w)
+	var found: Array = [null]
+	b.find_target = func(_at: Vector2, _r: float) -> MechSim: return found[0]
+	for i in 30:
+		b.advance(DT)
+	check(near(b.plane_pos.x, 85.8, 7.2) and b.is_lying(), "flies 0.2 s, to a frame (%.1f units), then lies still" % b.plane_pos.x)
+	var lying_at := b.plane_pos
+	for i in 60:
+		b.advance(DT)
+	check(b.plane_pos == lying_at and near(b.life, 20.0 - 1.5, 0.05), "waits, its 20 s running (%.2f left)" % b.life)
+	enemy.pos = lying_at + Vector2(0, 300)
+	found[0] = enemy
+	b.advance(DT)
+	check(b.target == enemy and b.dir.is_equal_approx(Vector2(0, 1)), "an enemy in range: it turns to face it")
+	for i in 17:
+		b.advance(DT)
+	check(b.plane_pos == lying_at, "still for delay_after_stop 0.3 s")
+	for i in 3:
+		b.advance(DT)
+	check(b.plane_pos.y > lying_at.y and near(b.life, 1.5, 0.05), "then chases, life now chase_time 1.5 s (%.2f)" % b.life)
+	b.free()
+	var players := [[1, Vector2(0, 0), true], [2, Vector2(300, 0), true], [3, Vector2(100, 0), false]]
+	check(Combat.mine_target(1, Vector2(150, 0), 400, players) == 0, "nearest other player dead: no target")
+	check(Combat.mine_target(1, Vector2(250, 0), 400, players) == 2, "nearest other player alive and in range")
+	check(Combat.mine_target(1, Vector2(800, 0), 400, players) == 0, "beyond 400 units: none")
+	check(Combat.mine_target(2, Vector2(250, 0), 400, players) == 0, "the owner itself never counts (3 is nearest and dead)")

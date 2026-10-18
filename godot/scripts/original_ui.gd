@@ -35,6 +35,16 @@ static func create(table: String) -> OriginalUI:
 		return OriginalUI.new()
 	return _build(table, _defs[table])
 
+## One child window of a dialog built on its own, like the guard gauge in
+## res_dlg_game_fight_background, which the original moves to follow the mech.
+static func create_child(table: String, key: String) -> OriginalUI:
+	_load_defs()
+	var kids: Variant = _defs.get(table, {}).get("child", {})
+	if not (kids is Dictionary and kids.get(key) is Dictionary):
+		push_error("UI window %s.%s is not exported; run tools/extract_ui.py" % [table, key])
+		return OriginalUI.new()
+	return _build(key, kids[key])
+
 static func available() -> bool:
 	_load_defs()
 	return not _defs.is_empty()

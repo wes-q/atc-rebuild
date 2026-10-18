@@ -39,7 +39,7 @@ class Weapon:
 	var life: float
 	var reload: float ## re_load_time, seconds
 	var crash_radius: float
-	var weapon_type: int ## 1 sword (HIT_TYPE_SWORD), 2 bullet, 5 shield
+	var weapon_type: int ## HIT_TYPE: 1 sword, 2 normal, 3 pierce, 4 splash, 5 energy shield, 6 solid shield
 	var collision_degree: float ## sword arc, whole angle in degrees
 	var collision_checker: int ## 1 the attacker decides the damage, 2 the one hit does
 	var ammo: int ## -1 when the weapon has no ammo limit
@@ -50,6 +50,7 @@ class Weapon:
 	var is_continuous: bool ## fires while the button is held (Heavy Machinegun, Plasma Shock Wave)
 	var splash_area: float ## splash radius in units
 	var state_action_type: int ## a status effect on the one hit (World::state_change)
+	var durability: float ## a shield's strength; rc_Weapon::init keeps x 10
 	## weapon_parameter.lua and the first weapon_mode_parameter.lua table for this weapon.
 	var param: Dictionary
 	var mode: Dictionary
@@ -73,9 +74,9 @@ class Weapon:
 	func is_charge() -> bool:
 		return bool(param.get("charge_weapon", false))
 
-	## Weapons whose behaviour is ported: not yet the EMP Shock Gun, Confusing Beam or X-Mine.
-	func is_supported() -> bool:
-		return id not in [17, 18, 19]
+	## is_stop: a mine that stops, waits for an enemy and then chases it (the X-Mine).
+	func is_mine() -> bool:
+		return int(mode.get("is_stop", 0)) == 1
 
 	## weapon_parameter.lua lockon_range x HAHA_SCALE_VAL, or 0 for a weapon without lock-on.
 	func lockon_range() -> float:
@@ -161,6 +162,7 @@ static func weapon(id: int) -> Weapon:
 	# Server: BYTE(splash_area / 100); client: x 100, then x HAHA_SCALE_VAL x 1.1.
 	s.splash_area = _byte(_num(w.splaqh_area) / 100.0) * 100.0 * Original.VEL_SCALE
 	s.state_action_type = int(_num(w.state_action_type))
+	s.durability = _num(w.get("durability"))
 	s.param = Bodies.weapon_param(id)
 	s.mode = Bodies.mode_param(id)
 	return s

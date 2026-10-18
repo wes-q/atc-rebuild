@@ -64,6 +64,17 @@ SOUNDS = [
     "sound/missile_start",         # MML sound_file[0]: weapon change
     "sound/missile Hit",           # MML sound_file[1]: a missile lands
     "sound/missile_fire",          # MML sound_file[2]: each missile
+    "sound/common/guard",          # on_guard: the guard goes up
+    "sound/common/guard_cancel",   # on_guard_cancel
+    "sound/common/shieldused",     # a click while guarding
+    "sound/common/energy_shield_defense",  # on_guard_defense, energy shield
+    "sound/common/solid_shield_defense",   # on_guard_defense, solid shield
+    "sound/common/bullet_defense1",        # on_guard_defense with bullet_guard_sound, one of six
+    "sound/common/bullet_defense2",
+    "sound/common/bullet_defense3",
+    "sound/common/bullet_defense4",
+    "sound/common/bullet_defense5",
+    "sound/common/bullet_defense6",
 ]
 
 # BGM::load play list in index order. A match plays rand() % 19; 19 is victory, 23 defeat.
@@ -443,6 +454,16 @@ BODIES = {
     "deff": ("anim04/deff_model_middle.x", "anim/deff_damage01.x", "anim/deff_damage02.x"),
     "alicia": ("anim04/ali_model.x", "anim/deff_damage01.x", "anim/deff_damage02.x"),
 }
+# Guard clips by body: take-out, defense (rcPlayer init for each class). Not named in the tables.
+GUARD_FILES = {
+    "zeid": ("anim/zeid_guard_take_out.x", "anim/zeid_guard_defense.x"),
+    "redkite": ("anim/redkite_guard_take_out.x", "anim/redkite_guard_defense.x"),
+    "gigas": ("anim/gigas_guard_take_out.x", "anim/gigas_guard_defense.x"),
+    "deff": ("anim/deff_guard_take_out.x", "anim/deff_guard_defense.x"),
+    "alicia": ("anim01/ali_guard_take_out.x", "anim01/ali_guard_defense.x"),
+}
+# World::receive_guard: a blocked hit, and the shield breaking.
+GUARD_EFFECTS = ("weapon/character_block.X", "weapon/shield_crash.X")
 # weapon_parameter.lua field prefixes, by body.
 WEAPON_FIELD_PREFIX = {"zeid": "zeid", "redkite": "redkite", "gigas": "gigas", "deff": "deff", "alicia": "alicia"}
 WEAPON_EFFECT_FIELDS = ("bullet_xfile", "bullet_xfile2", "bullet_xfile3", "bullet_start_xfile", "bullet_dead_xfile",
@@ -496,6 +517,9 @@ def convert_bodies(data_dir: pathlib.Path, out_dir: pathlib.Path) -> None:
             textures.add(skin)
     # Alicia's arrow, drawn on R_hand_dum beside the bow (is_arrow; not named in the tables).
     wanted.add("anim01/ali_hwasal.X")
+    for files in GUARD_FILES.values():
+        wanted.update(files)
+    wanted.update(GUARD_EFFECTS)
     converted = 0
     for rel in sorted(wanted):
         norm = rel.replace("\\", "/").lstrip("./")

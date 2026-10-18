@@ -44,7 +44,8 @@ godot --path godot -- practice              # alone, against a target dummy
 - Esc leaves the match and returns to the menu.
 
 How it works, following the original client: each player runs their own mech and sends its
-state 60 times a second. Shots go out as events, so both screens show every bullet. The
+state 60 times a second, tagged with the round so a late state from the last round cannot
+end the new one. Shots go out as events, so both screens show every bullet. The
 player who is hit decides the damage (the SR-3's database setting), then reports it to
 everyone. Remote mechs glide toward their reported position the way the original eased toward
 `lastRealPos`.
@@ -118,6 +119,10 @@ that and scaled to the window.
 - Off-screen players: a marker on a 180-pixel ring round the screen centre, the nearest
   one with the brighter image. Names float over mechs on screen, in team 0 green.
 - Under 10% HP, the SPAttack warning pulses under your mech.
+- With a shield, the guard gauge rides under your mech (`guard_gage`, moved every frame by
+  `updateguard`): HP, shield and bit bars, each easing to its new width over 0.5 s.
+- After an EMP hit the radar's enemy dots, the edge markers and the lock-on marks are hidden
+  for 12 s (`Radar::hide_time`).
 - HIT! when your shot lands and DAMAGE! when you are hit, the original particle scripts'
   textures, 100 units up the screen from your own mech (`World::process_damage`).
 
@@ -126,6 +131,8 @@ that and scaled to the window.
 - Each shot plays `gunfire1`, a hit plays `gun_Hit` at the mech hit, a boost start plays
   `sp_booster`, bouncing off the arena edge plays `special_fire`, a knockout plays
   `bomb-complete`.
+- The guard plays `guard` and `guard_cancel`; a block plays `energy_shield_defense` or
+  `solid_shield_defense`, plus one of six `bullet_defense` ricochets for some weapons.
 - Volume and pan are set once when a sound starts. The listener is over the camera but 300
   units off the plane, so a sound right below plays at 0.625 and fades out linearly by about
   740 units away. Pan is the sideways offset x 0.005 with a 50-unit dead zone.
@@ -134,9 +141,12 @@ that and scaled to the window.
   exist, so about one round in ten is silent, as it was.
 - Add `mute` after `--` to start silent.
 
-Test options, added after `--`: `netlog` prints positions once a second, `hp=60` starts every
-mech with 60 HP for quick knockouts, `capture=<dir>` saves 30 JPEG frames a second (run the
-window with `--max-fps 60`, or it runs unthrottled). `--write-movie` records sound as well.
+Test options, added after `--`: `netlog` prints positions, HP, shield and states once a
+second, `hp=60` starts every mech with 60 HP for quick knockouts, `capture=<dir>` saves 30 JPEG
+frames a second (run the window with `--max-fps 60 --always-on-top`, or it runs unthrottled or
+stalls when covered). `--write-movie` records sound as well. For practice: `dummy_guard` has the
+target raise its guard whenever it can, `dummy_near=200` starts it that far in front of you.
+For the autopilot: `slot=4` keeps it on one weapon, `autoguard` guards 2 s in every 8.
 
 ## Controls (as in the original)
 
@@ -144,7 +154,8 @@ window with `--max-fps 60`, or it runs unthrottled). `--write-movie` records sou
 |---|---|
 | WASD or arrows | Move along the screen axes |
 | Mouse | Aim. The mech turns toward the cursor at its turn rate |
-| 1 / 2 / 3 / 4 | The body's weapon slots (not while firing, a burst is out, a combo plays or a bow draws) |
+| 1 / 2 / 3 / 4 | The body's weapon slots (not while firing, a burst is out, a combo plays or a bow draws). Drops the guard |
+| Space | Raise or lower the guard (toggle) |
 | Left click | Attack with the selected weapon. One click, one attack, except: hold the Heavy Machinegun or Plasma Shock Wave to keep firing; hold the Plasma Bow to charge and let go to shoot; let go of the Cluster Cannon to burst its shells in the air |
 | F | Next lock-on target, with the missile launcher |
 | Right click (hold) | Boost, draining the gauge |
@@ -158,16 +169,17 @@ Pick the body in the menu, or add `body=<zeid|redkite|gigas|deff|alicia>` after 
 `dummy=<body>` for the practice target, otherwise a random other body). Each player's body
 travels with their state, so two different bodies can meet.
 
-| Body | Armour | Walk | Slot 1 | Slot 2 | Slot 3 | Slot 4 |
-|---|---|---|---|---|---|---|
-| Zeid | 700 | 108 | Dagger Type 1 | SR-3 | MML Type 1 | EMP Shock Gun (not yet) |
-| Red Kite | 850 | 99 | Dagger Type 1 | Plasma Rifle | Plasma Cannon | Confusing Beam (not yet) |
-| Gigas | 1000 | 89 | Dagger Type 1 | Heavy Machinegun | Cluster Cannon | X-Mine (not yet) |
-| Deff | 900 | 95 | Dagger Type 1 | Arms-Gun | HV Head Beam | Plasma Shock Wave |
-| Alicia | 750 | 102 | Saber Type 1 | Double Hand Gun | Plasma Bow | Plasma Shock Wave |
+| Body | Armour | Walk | Slot 1 | Slot 2 | Slot 3 | Slot 4 | Shield |
+|---|---|---|---|---|---|---|---|
+| Zeid | 700 | 108 | Dagger Type 1 | SR-3 | MML Type 1 | EMP Shock Gun | ES Type 1, energy, 350 |
+| Red Kite | 850 | 99 | Dagger Type 1 | Plasma Rifle | Plasma Cannon | Confusing Beam | EBS-0500, energy, 450 |
+| Gigas | 1000 | 89 | Dagger Type 1 | Heavy Machinegun | Cluster Cannon | X-Mine | SS Type 6, solid, 500 |
+| Deff | 900 | 95 | Dagger Type 1 | Arms-Gun | HV Head Beam | Plasma Shock Wave | SS-020, solid, 400 |
+| Alicia | 750 | 102 | Saber Type 1 | Double Hand Gun | Plasma Bow | Plasma Shock Wave | ES Type 2, energy, 300 |
 
 - **Loadouts:** the database defaults, with the shield taken out and the rest packed into
-  slots 1 to 4 (`Armor::init`). Every body starts on slot 2.
+  slots 1 to 4 (`Armor::init`). The shield is held apart and raised with Space. Every body
+  starts on slot 2.
 - **Models:** from `anim04` (the newer models with every boost nozzle, the Zeid included).
   Each weapon brings its own attack and move clips for that body and its held model:
   - Deff's Arms-Gun sits in both hands and fires from both.
@@ -186,12 +198,13 @@ travels with their state, so two different bodies can meet.
 ## Weapons (from `weapon_parameter.lua`, `weapon_mode_parameter.lua`, `rcAmmo.cpp`, `rcCombo.cpp`)
 
 The Zeid's default loadout from `RobotInfo`: slot 1 Dagger Type 1 (id 28), slot 2 SR-3 (id 3,
-selected at the start), slot 3 MML Type 1 (id 4), slot 4 ES Type 1, a shield.
+selected at the start), slot 3 MML Type 1 (id 4), slot 4 EMP Shock Gun (id 17), and the
+ES Type 1 shield held apart.
 
-- **Switching:** keys 1 to 3. The new weapon is drawn with its first clip. Every bullet that
-  mech has in flight disappears (`clear_active_bullet`), and the owner hears the weapon's
-  change sound. Every weapon keeps recharging while not selected, and all of them pause
-  while the mech is attacking.
+- **Switching:** keys 1 to 4. The new weapon is drawn with its first clip and the owner
+  hears the weapon's change sound. Bullets already in flight stay (`clear_active_bullet`
+  empties only the queue of shots not yet fired). Every weapon keeps recharging while not
+  selected, and all of them pause while the mech is attacking.
 - **Energy:** each bullet or swing spends the weapon's `cost_energy` from the boost gauge:
   20 per SR-3 bullet, 18 per dagger swing, nothing for missiles.
 - **Dagger:** a click swings at once; clicks during a swing queue the next, up to three
@@ -222,7 +235,8 @@ selected at the start), slot 3 MML Type 1 (id 4), slot 4 ES Type 1, a shield.
     mech on the line, only one round in three can do damage (`is_skip_crash`), and it shows
     a short tracer.
 - **Cluster Cannon:** a shell that bursts on a hit, a wall, the end of its life, or when you
-  let go of the button.
+  let go of the button. It is the only shell whose wall hit splashes (`explosion()` for id
+  11); every other bullet that meets a wall just shows its impact.
   - A direct hit does 52 + 60 to the mech hit.
   - Everything within 132 units takes 52, less 10% for each tenth of the radius.
   - Inside a fifth of the radius the damage is ×1.2.
@@ -234,6 +248,45 @@ selected at the start), slot 3 MML Type 1 (id 4), slot 4 ES Type 1, a shield.
 - **Plasma Shock Wave:** hold to stream 10 rounds a second, each turned up to 30° either
   way at random, homing weakly (40) on the lock-on target within 600 units.
 - **Saber Type 1:** Alicia's three-swing combo, landing from the start of each swing.
+
+**Shields** (Step 8, from `rcManager.cpp` `updateguard`, `rcPlayer.cpp` `guard`, `world.cpp`
+`process_crash` and `receive_guard`):
+- **Space toggles the guard** (`bDownGuard`); letting go does nothing. It goes up only with
+  durability left; raising it ends a held stream and a bow's draw. A weapon key drops it
+  and changes weapon. You can walk and turn at full speed, but not attack: a click only
+  sounds `shieldused`.
+- **Pose:** each body's guard take-out clip, held while guarding (movement clips are
+  skipped), and the defense clip on each block. Energy shields show the `pSHLD` particle
+  frame; Gigas and Deff hold their shield models in the left hand.
+- **Durability:** the database value x 10. It wears by the damage of each blocked hit and
+  recovers 7 a second while the guard is down. At 0 the shield breaks (`shield_crash.x`)
+  and the guard drops; every shield's mode has `shield_regeneration` 0, so a broken shield
+  stays broken for the rest of the round.
+- **What it stops:** hits whose bullet is in front, dot 0.2 or more from the facing (about
+  78 degrees either side). Swords and normal bullets are stopped (`character_block.x`,
+  the shield's defense sound, and a ricochet for weapons with `bullet_guard_sound`). Pierce
+  beams go through and only sound on it. A splash shell's direct hit does
+  `splash_damage + damage x splash_ratio` (0 unless the mode sets it), and the splash part is
+  not reduced. Confusing Beam hits and bow stuns that are stopped have no effect.
+- `durability_reduce`, `life_time` and the EBS-0500's cylinder collision are never read by
+  the original.
+
+**Slot-4 specials** (Step 8, from `rcAmmo.cpp`, `world.cpp` `state_change`,
+`rcPlayerState.cpp` and `radar.cpp`):
+- **EMP Shock Gun (Zeid):** 528 units/s for 0.7 s, 8 s reload, 40 shots, 120 energy each.
+  A direct hit does 20 (24 within 13 units) and splashes 0 to everything within 66 units,
+  the shooter included. Any EMP hit, even a 0, blanks your radar for 12 s: no enemy dots,
+  no edge markers, no lock-on marks (lock-on itself still works). The one hit carries
+  `fourth_new_zeid_spark.x` for 12 s, one per mech in the blast, as the original sent it.
+- **Confusing Beam (Red Kite):** 528 units/s for 0.7 s, 5 damage. For 8 s the one hit
+  moves and turns at 0.7, deals 0.7 damage and waits 0.8 s longer before each queued shot.
+  A new hit restarts the 8 s. Every machine applies it, so the one deciding a hit knows.
+- **X-Mine (Gigas):** two mines 0.5 and 1 s after the click, at 429 units/s. Each flies
+  0.2 s and stops, hidden from other players' screens while it waits. The first time the
+  nearest other player is alive and within 400 units, it turns to them, waits 0.3 s, then
+  chases (homing 90) for 1.5 s. Its 20 s life runs while it waits. On contact it does 30
+  to the one hit and splashes 20 within 66 units; at the end of its chase or life it
+  bursts in place, owner included. Mines do not show on the radar.
 
 **SR-3 mode 2 is left out on purpose.** Its data exists (`zeid2_mode2`, a 7-shot spray), but
 the shipped client cannot reach it: the F-key handler that would select it is commented out
@@ -290,8 +343,17 @@ parts added to the base stats.
   identifies it as `continuous_time`, the gap between shots.
 - The fire animation length (0.5 s) comes from the converted clip; the original playback rate
   of `.x` animations is assumed to match.
-- Shields (held with Space in the original) and three slot-4 weapons (EMP Shock Gun,
-  Confusing Beam, X-Mine) are not in yet; their keys do nothing.
+- A shield is whole again each round. The original set durability only when the player was
+  created, and each of its matches was a new game (inferred).
+- The guard break's own clip (`PLAYERANIM_ETC` clip 1) is not identified; the break shows
+  only `shield_crash.x`. A pierce hit through a guard keeps the guard pose rather than
+  playing a hit reaction (inferred).
+- The guard gauge's easing curve is assumed linear.
+- Halving damage while an energy-shield bullet is out (`damage_to_mul` 0.5) and the repair
+  bit shooting mines down are not ported: nothing in the five default loadouts creates them.
+- Every machine runs each X-Mine's search on its own, as the original did, so a mine can pick
+  a different moment to chase on each screen (inferred).
+- The X-Mine's fire sound (`gigas4fire.ogg`) is not in the archive.
 - A Cluster Cannon burst hurts its own shooter too. No owner exclusion was found in the
   source (inferred).
 - The bow's charged arrow sizes (`charged_crash_radius` 9 and 12) are used as plain radii
@@ -334,7 +396,7 @@ scripts/bodies.gd        the five bodies: models, loadouts, per-weapon clips and
 scripts/mech_view.gd     a body's model, retargeted clips, held weapons, the rotation table
 scripts/bullet.gd        projectile rounds: bullets, missiles, shells, arrows
 scripts/beam.gd          instant line weapons and their beams
-scripts/combat.gd        splash, stun and line-hit rules
+scripts/combat.gd        splash, stun, line-hit, guard and mine-target rules
 scripts/game.gd          modes, networking, rounds, hits, camera, target dummy, autopilot
 scripts/battle_world.gd  scenery and effects: arena, sky, lights, booster flames, hits, wall crash, explosion
 scripts/battle_map.gd    an arena's bounds, start points, lights and the edge bounce
@@ -350,5 +412,5 @@ tools/inspect_import.gd     prints an imported model's tree and clips
 tools/render_poses.gd       renders the mech at several facings
 tools/render_map.gd         renders an arena from above with its walls, bounds and start points
 tools/extract_ui.py         reads the HUD window tables and particle scripts, copies their art
-tests/test_mech_sim.gd      125 checks against the original database values and rules
+tests/test_mech_sim.gd      166 checks against the original database values and rules
 ```

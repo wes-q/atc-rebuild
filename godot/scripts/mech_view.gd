@@ -51,6 +51,10 @@ func _init(body_name := "zeid") -> void:
 			_import_clips(lib, move, "m%d_" % i)
 	for i in 2:
 		_import_clips(lib, Bodies.scene_path(Bodies.DAMAGE[body][i]), "damage%d_" % i)
+	for i in 2:
+		var guard_path := Bodies.scene_path(Bodies.GUARD[body][i])
+		if guard_path != "":
+			_import_clips(lib, guard_path, "guard%d_" % i)
 	player.add_animation_library("", lib)
 	player.playback_default_blend_time = 0.15
 
@@ -84,6 +88,17 @@ func _init(body_name := "zeid") -> void:
 			if trail:
 				break
 		sword_frames.append(trail)
+	# A solid shield's model (weapon_xfile on 'Bip01 L Hand'), drawn only while guarding.
+	shield_id = Bodies.shield_id(body)
+	if shield_id > 0:
+		var view := Bodies.weapon_view(body, shield_id)
+		var shield_path := Bodies.scene_path(view["held"])
+		var hand_name := str(Bodies.weapon_param(shield_id).get("frame_name_to_attach_weapon", ""))
+		var hand := model.find_child(hand_name, true, false) as Node3D if hand_name != "" else null
+		if shield_path != "" and hand:
+			_shield_model = (load(shield_path) as PackedScene).instantiate() as Node3D
+			hand.add_child(_shield_model)
+			_shield_model.visible = false
 	particles = ParticleFX.attach_all(model)
 	# rcPlayer init: the idle nozzles run; boost, directional bursts and the shield wait.
 	for group in particles:
@@ -176,9 +191,43 @@ func is_attack_playing() -> bool:
 func is_drawing() -> bool:
 	return player.is_playing() and _current == "w%d_0" % weapon_slot
 
-## rcPlayer::damage(DAMAGE_1): one of the two hit clips at random. Skipped mid-attack.
+## rcPlayer::guard: the take-out clip, held on its last frame while guarding (movement
+## clips are skipped), the SHLD particles for an energy shield or the shield model for a
+## solid one. guard_cancel blends back to the move clip over 0.3 s.
+var guarding := false
+var shield_id := 0
+var _shield_model: Node3D
+func set_guard(on: bool) -> void:
+	guarding = on
+	if _shield_model:
+		_shield_model.visible = on
+	for fx: ParticleFX in particles.get("SHLD", []):
+		if on:
+			fx.start()
+		else:
+			fx.stop()
+	if on:
+		_play_blend("guard0_0", 0.3)
+	else:
+		_current = ""
+
+## rcPlayer::guard_defense: a blocked hit.
+func play_guard_defense() -> void:
+	if guarding:
+		_play_blend("guard1_0", 0.1)
+
+func _play_blend(clip: String, blend: float) -> void:
+	if not player.has_animation(clip):
+		return
+	player.get_animation(clip).loop_mode = Animation.LOOP_NONE
+	_current = clip
+	player.play(clip, blend)
+	_trail.end()
+
+## rcPlayer::damage(DAMAGE_1): one of the two hit clips at random. Skipped mid-attack and
+## while guarding.
 func play_damage() -> void:
-	if is_attack_playing():
+	if is_attack_playing() or guarding:
 		return
 	_play("damage%d_0" % (randi() % 2), false, true)
 

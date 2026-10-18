@@ -20,6 +20,10 @@ extends Node3D
 const PORT := 7777
 const DUMMY_ID := -1
 const NO_TARGET := 0
+## _apply_hit without a direction: no guard test.
+const NO_FROM := Vector2(INF, INF)
+const CHARACTER_BLOCK := "res://assets/original/x/weapon/character_block.gltf"
+const SHIELD_CRASH := "res://assets/original/x/weapon/shield_crash.gltf"
 const RESULT_DELAY := 1.5 ## after the last knockout, so the explosion plays first
 const RESULT_TIME := 6.0 ## results on screen before the next round
 
@@ -94,8 +98,16 @@ var _autopilot := OS.get_cmdline_user_args().has("autopilot")
 var _clock := 0.0
 var _status := ""
 var _netlog := OS.get_cmdline_user_args().has("netlog")
+## Practice: the target raises its guard whenever it can (for testing blocks).
+var _dummy_guard := OS.get_cmdline_user_args().has("dummy_guard")
+## Autopilot: raise the guard for 2 s of every 8 s weapon cycle.
+var _autoguard := OS.get_cmdline_user_args().has("autoguard")
 ## Test option "hp=<n>": start every mech with n armour points so knockouts come quickly.
 var _test_hp := _arg_int("hp=")
+## Practice: the target starts this many units in front of you each round (for testing).
+var _dummy_near := _arg_int("dummy_near=")
+## Autopilot: keep to this weapon slot (1 to 4) instead of cycling.
+var _autopilot_slot := _arg_int("slot=")
 ## Test option "capture=<dir>": saves 30 frames per second of real-time play as JPEGs.
 var _capture_dir := _arg_str("capture=")
 var _capture_time := 0.0
@@ -333,6 +345,11 @@ func _begin_round(number: int, map_id: String, spawns: Array[int]) -> void:
 			# Start points are far apart, so the camera starts on the mech instead of gliding there.
 			cam_from = Vector3(m.sim.pos.x, -depth, m.sim.pos.y)
 			_update_camera(m, 0.0)
+	var me := _local()
+	if _dummy_near > 0 and me and mechs.has(DUMMY_ID):
+		var d: Mech = mechs[DUMMY_ID]
+		var at := me.sim.pos + Original.vec2_from_deg(me.sim.facing) * _dummy_near
+		d.sim.reset_at(at, (me.sim.facing + 180) % 360)
 	hud.hide_result()
 
 @rpc("authority", "call_remote", "reliable")
@@ -456,11 +473,15 @@ func _net_state(state: Array) -> void:
 	if not mechs.has(id):
 		_spawn(id, 0 if id == 1 else 1, false)
 	var m: Mech = mechs[id]
+	# A state sent before the owner heard of a new round still carries the old round's knockout,
+	# which would end the new round at once.
+	if int(state[state.size() - 1]) != round_number:
+		return
 	# The owner's body: rebuild their mech when it differs from what we drew.
-	var body_index := int(state[state.size() - 1])
+	var body_index := int(state[state.size() - 2])
 	if body_index >= 0 and body_index < Bodies.NAMES.size() and Bodies.NAMES[body_index] != m.body:
 		_respawn_body(m, Bodies.NAMES[body_index])
-	m.lock_target = int(state[state.size() - 2])
+	m.lock_target = int(state[state.size() - 3])
 	m.sim.apply_snapshot(state)
 
 ## A shot, from the shooter's muzzle. Reliable so both screens show every bullet.
@@ -493,15 +514,10 @@ func _net_swing(swing: int) -> void:
 
 ## A swing from another machine landed on this machine's mech.
 @rpc("any_peer", "call_remote", "reliable")
-func _net_melee_hit(amount: int, weapon_id: int) -> void:
-	var attacker := multiplayer.get_remote_sender_id()
+func _net_melee_hit(amount: int, weapon_id: int, from: Vector2) -> void:
 	var me := _local()
-	if me == null or me.sim.life <= 0 or not round_active:
-		return
-	me.sim.take_damage(amount)
-	_record_hit(me.id, attacker, amount, me.sim.life, weapon_id)
-	if _networked():
-		_net_hit.rpc(attacker, amount, me.sim.life, weapon_id)
+	if me:
+		_apply_hit(me, multiplayer.get_remote_sender_id(), amount, weapon_id, from)
 
 ## The victim's machine reports a hit it decided (World::damage_respond).
 @rpc("any_peer", "call_remote", "reliable")
@@ -534,12 +550,14 @@ func _build_body(m: Mech, body: String) -> void:
 	m.sim.boost_started.connect(func() -> void: sound.play_at("sound/sp_booster", m.sim.pos))
 	m.sim.weapon_changed.connect(func(w: int) -> void: _on_weapon_changed(m, w))
 	m.sim.charge_changed.connect(func(level: int) -> void: m.view.set_charge(level))
+	m.sim.guard_changed.connect(func(on: bool) -> void: _on_guard_changed(m, on))
 	if m.local or m.id == DUMMY_ID:
 		m.sim.fired.connect(func(_o: Vector2, deg: int) -> void: _on_local_fired(m, deg))
 		m.sim.attack_started.connect(func(_w: int) -> void: m.burst_target = m.lock_target)
 		m.sim.swung.connect(func(_w: int, swing: int) -> void: _on_local_swing(m, swing))
 	if m.local:
 		m.sim.wall_crashed.connect(func(at: Vector2, normal: Vector2) -> void: _on_wall_crash(m, at, normal))
+		m.sim.shield_clicked.connect(func() -> void: sound.play("sound/common/shieldused"))
 
 ## Another player's body arrived: swap the model and simulation, keeping where they are.
 func _respawn_body(m: Mech, body: String) -> void:
@@ -561,14 +579,11 @@ func _on_wall_crash(m: Mech, at: Vector2, normal: Vector2) -> void:
 	BattleWorld.wall_crash(self, at, normal)
 	sound.play_at("sound/special_fire", m.sim.pos)
 
-## rcPlayer::change_weapon on every machine: the new weapon drawn, that mech's bullets in
-## flight cleared (clear_active_bullet); the owner hears sound_file[0] (on_my_weapon_change).
+## rcPlayer::change_weapon on every machine: the new weapon drawn; the owner hears
+## sound_file[0] (on_my_weapon_change). clear_active_bullet empties only the queue of shots
+## not yet fired, which the sim never leaves behind on a change; bullets in flight stay.
 func _on_weapon_changed(m: Mech, w: int) -> void:
 	m.view.set_weapon(w)
-	for i in range(bullets.size() - 1, -1, -1):
-		if int(bullets[i].get_meta("shooter")) == m.id:
-			bullets[i].queue_free()
-			bullets.remove_at(i)
 	if m.local:
 		sound.play(Bodies.sounds(m.sim.weapon.id)[0])
 
@@ -613,14 +628,12 @@ func _step_swings(dt: float) -> void:
 				continue
 			swings.remove_at(i)
 			BattleWorld.sword_hit(self, victim.sim.pos)
+			# The guard test runs where the victim's guard and facing are known for sure.
 			if round_active:
-				if victim.local or victim.id == DUMMY_ID:
-					victim.sim.take_damage(w.damage)
-					_record_hit(victim.id, attacker.id, w.damage, victim.sim.life, w.id)
-					if _networked() and victim.local:
-						_net_hit.rpc(attacker.id, w.damage, victim.sim.life, w.id)
+				if _owns(victim):
+					_apply_hit(victim, attacker.id, w.damage, w.id, attacker.sim.pos)
 				elif _networked():
-					_net_melee_hit.rpc_id(victim.id, w.damage, w.id)
+					_net_melee_hit.rpc_id(victim.id, w.damage, w.id, attacker.sim.pos)
 			break
 
 ## LockOnSystem::update for the local mech with a guided weapon: enemies within the range
@@ -698,11 +711,13 @@ func _physics_process(dt: float) -> void:
 				var state := m.sim.snapshot()
 				state.append(m.lock_target)
 				state.append(Bodies.NAMES.find(m.body))
+				state.append(round_number)
 				_net_state.rpc(state)
 		elif m.id == DUMMY_ID:
 			var it := MechSim.Intent.new()
 			var me := _local()
 			it.aim = me.sim.pos if me else Vector2.ZERO
+			it.guard = _dummy_guard and round_active and not m.sim.guarding and fmod(round_time, 1.0) < 0.1
 			m.sim.step(it, dt)
 		else:
 			m.sim.step_remote(dt)
@@ -724,8 +739,17 @@ func _physics_process(dt: float) -> void:
 			_log_timer = 0.0
 			var parts: Array[String] = []
 			for m: Mech in mechs.values():
-				parts.append("%s%d pos=(%d,%d) hp=%d" % ["me" if m.local else "peer", m.id, m.sim.pos.x, m.sim.pos.y, m.sim.life])
-			print("[%s r%d %s] " % [mode, round_number, "on" if round_active else "off"], "  ".join(parts))
+				var flags := (" G" if m.sim.guarding else "") + (" C" if m.sim.is_confused() else "") + (" J" if m.local and hud.jam_time > 0.0 else "")
+				parts.append("%s%d %s pos=(%d,%d) hp=%d sh=%d%s" % ["me" if m.local else "peer", m.id, m.body, m.sim.pos.x, m.sim.pos.y, m.sim.life, m.sim.durability, flags])
+			var mines := 0
+			var lying := 0
+			for bl in bullets:
+				if bl.mine:
+					mines += 1
+					lying += int(bl.is_lying())
+			if mines > 0:
+				parts.append("mines=%d lying=%d" % [mines, lying])
+			print("[%s r%d %s f%d] " % [mode, round_number, "on" if round_active else "off", _capture_index], "  ".join(parts))
 
 func _process(dt: float) -> void:
 	var me := _local()
@@ -786,7 +810,10 @@ func _draw_mech(m: Mech, dt: float) -> void:
 		return
 	m.view.visible = true
 	_low_health_sparks(m, dt)
-	if m.sim.is_dead or m.view.is_attack_playing() or m.view.is_reacting() or m.view.is_drawing():
+	if m.view.guarding != m.sim.guarding:
+		m.view.set_guard(m.sim.guarding)
+	# rcPlayer::move returns early in BEHAVE_GUARD: the guard pose holds while walking.
+	if m.sim.is_dead or m.sim.guarding or m.view.is_attack_playing() or m.view.is_reacting() or m.view.is_drawing():
 		return
 	var clip := m.sim.move_clip()
 	if clip < 0:
@@ -815,6 +842,7 @@ func _read_intent(m: Mech) -> MechSim.Intent:
 	it.down = Input.is_action_pressed("move_down")
 	it.boost = Input.is_action_pressed("boost")
 	it.fire = Input.is_action_pressed("fire")
+	it.guard = Input.is_physical_key_pressed(KEY_SPACE)
 	# DIK_1 to DIK_4, or the keypad.
 	for k in 4:
 		if Input.is_physical_key_pressed(KEY_1 + k) or Input.is_physical_key_pressed(KEY_KP_1 + k):
@@ -880,6 +908,9 @@ func _launch(origin: Vector2, deg: int, shooter: Mech, weapon_id: int, target: i
 	var chase: MechSim = (mechs[target] as Mech).sim if target != NO_TARGET and mechs.has(target) else null
 	b.setup(origin, deg, shooter.sim, w, chase, charge)
 	b.set_meta("shooter", shooter.id)
+	if b.mine:
+		var owner_id := shooter.id
+		b.find_target = func(at: Vector2, detect_range: float) -> MechSim: return _mine_target(owner_id, at, detect_range)
 	bullets.append(b)
 
 ## An immediate shot. is_skip_crash: only one round in skip_crash_count + 1 can hit. The
@@ -940,38 +971,141 @@ func _step_beams(dt: float) -> void:
 			else:
 				beam.alive = false
 				BattleWorld.hit_flash(self, victim.sim.pos, Bodies.scene_path(str(beam.weapon.mode.get("bullet_dead_xfile", ""))))
-			_apply_hit(victim, beam.shooter_id, beam.weapon.damage, beam.weapon.id)
+			_apply_hit(victim, beam.shooter_id, beam.weapon.damage, beam.weapon.id, beam.start)
 			if not beam.alive:
 				break
 
-## A hit this machine decides: its own mech, or the practice target.
-func _apply_hit(victim: Mech, attacker: int, amount: int, weapon_id: int) -> void:
-	if not round_active or not (victim.local or victim.id == DUMMY_ID) or victim.sim.life <= 0:
-		return
+## Whether this machine decides hits on the mech: its own, or the practice target.
+func _owns(m: Mech) -> bool:
+	return m.local or m.id == DUMMY_ID
+
+## A hit this machine decides: its own mech, or the practice target. from is where the shot
+## came from for the guard test (the bullet's last position, the attacker for a sword), or
+## NO_FROM for none. A guard facing it stops a sword or normal shot (World::process_crash);
+## a pierce shot goes through but still sounds on the shield. The damage that lands is cut by
+## the attacker's confusion (mul_to_damage). Returns false if nothing landed.
+func _apply_hit(victim: Mech, attacker: int, amount: int, weapon_id: int, from := NO_FROM) -> bool:
+	if not round_active or not _owns(victim) or victim.sim.life <= 0:
+		return false
+	if from != NO_FROM and victim.sim.guards_against(from):
+		if Combat.guard_rule(GameData.weapon(weapon_id).weapon_type) == Combat.Guard.BLOCK:
+			# RG_SHIELD_BLOCK_SUCCESS_REQ: the damage, at most a byte, wears the shield.
+			var worn := mini(amount, 255)
+			_guarded(victim, weapon_id, worn, victim.sim.block(worn))
+			return false
+		_guarded(victim, weapon_id, -1, false)
+	if mechs.has(attacker):
+		amount = int(amount * (mechs[attacker] as Mech).sim.damage_mul)
 	victim.sim.take_damage(amount)
 	_record_hit(victim.id, attacker, amount, victim.sim.life, weapon_id)
 	if _networked() and victim.local:
 		_net_hit.rpc(attacker, amount, victim.sim.life, weapon_id)
+	return true
+
+## A guard met a hit on this machine's mech: show it everywhere. blocked: the durability it
+## took, or -1 when the shot went through; broke: the shield broke.
+func _guarded(victim: Mech, weapon_id: int, blocked: int, broke: bool) -> void:
+	_show_guarded(victim, weapon_id, blocked, broke)
+	if _networked() and victim.local:
+		_net_guarded.rpc(weapon_id, blocked, broke)
+
+@rpc("any_peer", "call_remote", "reliable")
+func _net_guarded(weapon_id: int, blocked: int, broke: bool) -> void:
+	var id := multiplayer.get_remote_sender_id()
+	if mechs.has(id):
+		_show_guarded(mechs[id], weapon_id, blocked, broke)
+
+## on_guard_defense: the defense clip, the shield's sound and, for a weapon whose mode sets
+## bullet_guard_sound, one of six ricochets. World::receive_guard: character_block 30 units
+## up the plane; at 0 durability shield_crash.
+func _show_guarded(victim: Mech, weapon_id: int, blocked: int, broke: bool) -> void:
+	var at := victim.sim.pos
+	victim.view.play_guard_defense()
+	var energy := victim.sim.shield != null and victim.sim.shield.weapon_type == 5
+	sound.play_at("sound/common/energy_shield_defense" if energy else "sound/common/solid_shield_defense", at)
+	if int(GameData.weapon(weapon_id).mode_num("bullet_guard_sound")) == 1:
+		sound.play_at("sound/common/bullet_defense%d" % randi_range(1, 6), at)
+	if blocked >= 0:
+		BattleWorld.spawn_effect(self, CHARACTER_BLOCK, BattleWorld.effect_basis(1.0), at + Vector2(0, 30), 0.5)
+	if broke:
+		BattleWorld.spawn_effect(self, SHIELD_CRASH, BattleWorld.effect_basis(1.0), at, 1.0)
+
+## pt_send_attack_start(WEAPON_GUARD / WEAPON_GUARD_CANCEL) and its echo: on_guard and
+## on_guard_cancel sound on every machine. The view follows the sim in _draw_mech.
+func _on_guard_changed(m: Mech, on: bool) -> void:
+	sound.play_at("sound/common/guard" if on else "sound/common/guard_cancel", m.sim.pos)
+
+## World::state_change, decided by the machine of the mech hit and sent to everyone.
+func _state_change(victim: Mech, weapon_id: int, count := 1) -> void:
+	_show_state(victim, weapon_id, count)
+	if _networked() and victim.local:
+		_net_state_change.rpc(weapon_id, count)
+
+@rpc("any_peer", "call_remote", "reliable")
+func _net_state_change(weapon_id: int, count: int) -> void:
+	var id := multiplayer.get_remote_sender_id()
+	if mechs.has(id):
+		_show_state(mechs[id], weapon_id, count)
+
+## state_action_type 5 (Confusing Beam): the slow-down on every machine and spark.x on the
+## mech for confusion_time. 4 (EMP Shock Gun): fourth_new_zeid_spark.x on the mech for
+## jamming_time; the original sent one per player in the splash loop, so they pile up.
+func _show_state(victim: Mech, weapon_id: int, count: int) -> void:
+	var w := GameData.weapon(weapon_id)
+	var time := 0.0
+	if w.state_action_type == 5:
+		victim.sim.confuse(w)
+		time = w.mode_num("confusion_time")
+	elif w.state_action_type == 4:
+		time = w.mode_num("jamming_time")
+	var path := Bodies.scene_path(str(w.mode.get("bullet_dead_xfile2", "")))
+	if time <= 0.0 or path == "":
+		return
+	for i in count:
+		var fx := BattleWorld.spawn_effect(victim.view, path, BattleWorld.effect_basis(1.0), Vector2.ZERO, time)
+		if fx:
+			MechView.play_effect(fx, true)
+
+## An X-Mine looking for a target from where it lies.
+func _mine_target(owner_id: int, at: Vector2, detect_range: float) -> MechSim:
+	var players := []
+	for m: Mech in mechs.values():
+		players.append([m.id, m.sim.pos, m.sim.life > 0])
+	var id := Combat.mine_target(owner_id, at, detect_range, players)
+	return (mechs[id] as Mech).sim if id != 0 and mechs.has(id) else null
 
 ## rc_bullet::explosion for a splash shell at a point: every mech within the radius, on the
-## machine that owns it, takes the falloff damage. The shooter is not spared (inferred: no
-## exclusion was found). direct: the mech that took the shell itself, if any.
+## machine that owns it, takes the falloff damage. The shooter is not spared (no exclusion in
+## the original). direct: the mech that took the shell itself, if any; a guard facing the
+## shell leaves it splash_damage plus damage x splash_ratio. A weapon with jamming_time (the
+## EMP) reports even a 0 hit, which is what jams the radar; its direct hit also sends the
+## state change, once per mech in the loop.
 func _explode(b: Bullet, at: Vector2, direct: Mech = null) -> void:
 	BattleWorld.hit_flash(self, at, b.boom_scene())
 	var shooter: int = b.get_meta("shooter")
 	var radius := b.weapon.splash_area
 	var splash := b.weapon.mode_num("splash_damage")
+	var jams := b.weapon.mode_num("jamming_time") > 0.0
+	var in_radius := 0
 	for m: Mech in mechs.values():
 		if m.sim.life <= 0:
 			continue
 		var d := m.sim.pos.distance_to(at)
+		if d <= radius:
+			in_radius += 1
 		var amount := 0
 		if m == direct:
-			amount = Combat.splash_direct(splash, b.power, radius, d)
+			var power := b.power
+			if _owns(m) and round_active and m.sim.guards_against(b.prev_pos):
+				power = int(b.power * b.weapon.mode_num("splash_ratio"))
+				_guarded(m, b.weapon_id, -1, false)
+			amount = Combat.splash_direct(splash, power, radius, d)
 		else:
 			amount = Combat.splash_falloff(splash, radius, d)
-		if amount > 0:
+		if amount > 0 or (jams and d <= radius):
 			_apply_hit(m, shooter, amount, b.weapon_id)
+	if direct and _owns(direct) and round_active and b.weapon.state_action_type == 4:
+		_state_change(direct, b.weapon_id, maxi(1, in_radius))
 
 ## Sets off a shooter's live shells that go off on button release. True if any did.
 func _detonate_shells(shooter: int) -> bool:
@@ -1001,13 +1135,15 @@ func _step_bullets(dt: float) -> void:
 				_explode(b, b.plane_pos)
 			elif b.guided > 0:
 				BattleWorld.hit_flash(self, b.plane_pos, b.boom_scene())
-		# World::update: a bullet that meets a wall stops there (rc_map::is_crashed_with_object).
+		# World::update: a bullet that meets a wall stops there (rc_map::is_crashed_with_object)
+		# with explosion(crashed_pos), which only shows the effect. The Cluster Cannon (11)
+		# alone calls explosion(), the splash, where the shell is.
 		if alive and map:
 			var wall: Variant = map.collision.segment_hit(prev, b.plane_pos)
 			if wall != null:
 				alive = false
-				if b.weapon.is_splash():
-					_explode(b, wall)
+				if b.weapon_id == 11:
+					_explode(b, b.plane_pos)
 				else:
 					BattleWorld.hit_flash(self, wall, b.boom_scene())
 		for m: Mech in mechs.values():
@@ -1022,11 +1158,16 @@ func _step_bullets(dt: float) -> void:
 				_explode(b, b.plane_pos, m)
 				continue
 			BattleWorld.hit_flash(self, b.plane_pos, b.boom_scene())
-			if round_active and (m.local or m.id == DUMMY_ID) and m.sim.life > 0:
-				# World::state_change for the Plasma Bow: stun and push, on the victim's machine.
+			# World::state_change on the victim's machine, only for a hit no guard stopped:
+			# the Plasma Bow stuns and pushes, the Confusing Beam confuses.
+			if _apply_hit(m, shooter, b.power, b.weapon_id, b.prev_pos):
 				if b.weapon.state_action_type == 3:
 					_stun(m, b.charge, b.dir)
-				_apply_hit(m, shooter, b.power, b.weapon_id)
+				elif b.weapon.state_action_type == 5:
+					_state_change(m, b.weapon_id)
+		# Other screens do not draw a mine lying in wait (no is_stealth model); its owner does.
+		if alive and b.mine:
+			b.visible = not b.is_lying() or (mechs.has(shooter) and _owns(mechs[shooter]))
 		if not alive:
 			b.queue_free()
 			bullets.remove_at(i)
@@ -1044,6 +1185,10 @@ func _record_hit(victim_id: int, attacker_id: int, amount: int, remaining: int, 
 		victim.view.play_damage()
 	elif stats.has(attacker_id) and attacker_id != victim_id:
 		(stats[attacker_id] as Stats).kills += 1
+	# myplayer_is_damaged: the EMP blanks your radar for jamming_time, any hit, even 0.
+	var jamming := GameData.weapon(weapon_id).mode_num("jamming_time")
+	if victim_id == local_id and jamming > 0.0:
+		hud.jam_time = jamming
 	# on_bullet_explosion: the attacker's weapon hit sound at the mech that was hit.
 	sound.play_at(Bodies.sounds(weapon_id)[1], victim.sim.pos)
 	# scar_effect: the bow's caution mark over the one hit.
@@ -1122,6 +1267,9 @@ func _shake_offset(dt: float) -> float:
 
 ## Scripted duel for recordings and checks. With an enemy: close to firing range, strafe
 ## around them with boost bursts, fire when in range. Without one: a walk-boost-fire route.
+var _stuck_check := 0.0
+var _stuck_from := Vector2.ZERO
+var _unstick_time := 0.0
 func _autopilot_intent(m: Mech) -> MechSim.Intent:
 	_clock += get_physics_process_delta_time()
 	var it := MechSim.Intent.new()
@@ -1135,11 +1283,9 @@ func _autopilot_intent(m: Mech) -> MechSim.Intent:
 		it.fire = t > 1.5
 		return it
 	# Cycle through the usable slots every 8 s, pressing the key for a few frames.
-	var usable: Array[int] = []
-	for i in m.sim.slots.size():
-		if m.sim.slots[i].data.is_supported():
-			usable.append(i)
-	var wanted_slot: int = usable[(int(_clock / 8.0) + 1) % usable.size()]
+	var wanted_slot: int = (int(_clock / 8.0) + 1) % m.sim.slots.size()
+	if _autopilot_slot > 0:
+		wanted_slot = mini(_autopilot_slot, m.sim.slots.size()) - 1
 	if m.sim.weapon_index != wanted_slot and fmod(_clock, 0.5) < 0.1:
 		it.weapon_key = wanted_slot + 1
 	var to := enemy.sim.pos - m.sim.pos
@@ -1147,9 +1293,23 @@ func _autopilot_intent(m: Mech) -> MechSim.Intent:
 	it.aim = enemy.sim.pos
 	var w := m.sim.weapon
 	var reach := w.crash_radius * 0.9 if w.is_sword() else (w.line_distance * 0.9 if w.is_immediate() else (w.lockon_range() * 0.8 if w.lockon_range() > 0.0 else w.bullet_speed * w.life))
+	if w.is_mine():
+		reach = w.mode_num("detecting_area") * 0.8
+	elif not w.is_sword() and not w.is_immediate() and w.lockon_range() <= 0.0:
+		# Straight shots: stay close enough to keep both mechs in the original camera's view.
+		reach = minf(reach, 260.0)
 	var near_d := reach * 0.5 if not w.is_sword() else 0.0
 	var side := 1.0 if fmod(_clock + m.slot * 2.5, 5.0) < 2.5 else -1.0
 	var want := to.normalized() if dist > reach * 0.8 else (-to.normalized() if dist < near_d else Vector2(-to.y, to.x).normalized() * side)
+	# Test driver only: pinned on a wall for 1.5 s, sidestep for a second.
+	_stuck_check += get_physics_process_delta_time()
+	if _stuck_check >= 1.5:
+		_unstick_time = 1.0 if m.sim.pos.distance_to(_stuck_from) < 30.0 else 0.0
+		_stuck_check = 0.0
+		_stuck_from = m.sim.pos
+	if _unstick_time > 0.0:
+		_unstick_time -= get_physics_process_delta_time()
+		want = Vector2(-to.y, to.x).normalized()
 	it.right = want.x > 0.35
 	it.left = want.x < -0.35
 	it.up = want.y > 0.35
@@ -1172,4 +1332,10 @@ func _autopilot_intent(m: Mech) -> MechSim.Intent:
 		it.fire = (has_shell and not shell_near) or (not has_shell and dist < reach and fmod(_clock, 0.5) < 0.25)
 	else:
 		it.fire = dist < reach and fmod(_clock, 0.2) < 0.1
+	if _autoguard:
+		var c := fmod(_clock, 8.0)
+		var want_guard := c >= 5.0 and c < 7.0
+		it.guard = want_guard != m.sim.guarding and fmod(_clock, 0.5) < 0.1
+		if m.sim.guarding:
+			it.fire = false
 	return it

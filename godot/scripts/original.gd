@@ -16,6 +16,8 @@ const VEL_SCALE := 0.3 * 1.1 ## HAHA_VEL_SCALE_VAL * 1.1, applied to robot and b
 const BOOSTER_INIT_EXTRA := 70.0 ## booster_init_speed = booster_speed + 70
 const BOOSTER_INIT_HOLD := 0.04 ## booster_init_time threshold in rcPlayer::update
 const TURN_SNAP_DOT := 0.98 ## facing stops turning once within acos(0.98) of the mouse
+## World::process_crash: a guard stops a hit whose bullet is in front, past this dot.
+const GUARD_DOT := 0.2
 
 # --- Camera (C++ View_Manager.cpp, world.cpp) -------------------------------------------
 const CAMERA_DEPTH_MIN := 550.0 ## alive: min_depth

@@ -86,6 +86,22 @@ static func loadout(body: String) -> Array[int]:
 		out.append(id)
 	return out
 
+## Armor::init: the default weapon of a shield type becomes player->shield, or 0 for none.
+static func shield_id(body: String) -> int:
+	for id in GameData.robot(body).weapons:
+		if id > 0 and GameData.weapon(id).weapon_type in SHIELD_TYPES:
+			return id
+	return 0
+
+## Guard clips by body, take-out then defense (each class's init; not named in the tables).
+const GUARD := {
+	"zeid": ["anim/zeid_guard_take_out.x", "anim/zeid_guard_defense.x"],
+	"redkite": ["anim/redkite_guard_take_out.x", "anim/redkite_guard_defense.x"],
+	"gigas": ["anim/gigas_guard_take_out.x", "anim/gigas_guard_defense.x"],
+	"deff": ["anim/deff_guard_take_out.x", "anim/deff_guard_defense.x"],
+	"alicia": ["anim01/ali_guard_take_out.x", "anim01/ali_guard_defense.x"],
+}
+
 ## What a body shows for one weapon: its attack and move files (weapon_parameter.lua
 ## <body>_animation_xfile), the held model and the frames it sits in.
 static func weapon_view(body: String, id: int) -> Dictionary:

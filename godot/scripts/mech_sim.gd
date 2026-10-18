@@ -14,6 +14,7 @@ class Intent:
 	var boost := false ## right mouse button
 	var fire := false ## left mouse button, held state; attacks start on the press
 	var weapon_key := 0 ## number key held this frame, 1 to 4, or 0
+	var guard := false ## Space, held state; the guard toggles on the press
 	var aim := Vector2.ZERO ## point under the mouse, on the plane
 
 	func move_dir() -> Vector2:
@@ -36,6 +37,10 @@ signal charge_changed(level: int)
 signal exploded
 ## Pushed back off the arena edge (rc_map::crashed_with_wall), for the wall_crash effect.
 signal wall_crashed(point: Vector2, normal: Vector2)
+## The guard went up or down (pt_send_attack_start WEAPON_GUARD / WEAPON_GUARD_CANCEL).
+signal guard_changed(on: bool)
+## A click while guarding with the selected weapon recharged (sound/common/shieldused).
+signal shield_clicked
 ## rcPlayerManager::on_booster, for the sp_booster sound. The owner's client calls it when a
 ## boost starts; other clients call it for every boosting move message they receive.
 signal boost_started
@@ -121,7 +126,7 @@ var _booster_input := BoosterInput.NOTHING
 var _prev_keys := [false, false, false, false]
 
 # Weapon (rcWeaponMode, rc_Weapon::update_bullet). Starts charged.
-## Weapon slots 1 to 4 (RobotInfo default weapons). Slot 4 is the shield, not usable yet.
+## Weapon slots 1 to 4 (RobotInfo default weapons, the shield taken out).
 var slots: Array[Slot] = []
 var weapon_index := Original.START_WEAPON
 ## The selected weapon's data and recharge.
@@ -157,6 +162,26 @@ var _swing_time := 0.0
 var _prev_fire := false
 var _prev_weapon_key := 0
 
+# Shield (player->shield, an rc_Weapon of type 5 or 6 kept out of the slots).
+## The shield's data, or null for a body without one.
+var shield: GameData.Weapon
+## rc_Weapon::init: durability x 10; the gauge shows durability over that.
+var shield_max := 0.0
+var durability := 0.0
+## shield_recover_amount, a second, while the guard is down and the shield is not broken.
+var shield_recover := 0.0
+## rcPlayer::guard: BEHAVE_GUARD until cancelled (guard_time is never counted down).
+var guarding := false
+var _prev_guard := false
+
+# Confusing Beam (World::state_change, state_action_type 5): MoveState, TurnState and
+# ConfusionState, all for confusion_time. A newer hit restarts the time.
+var confusion_time := 0.0
+var move_mul := 1.0 ## velocity x this (MoveState)
+var turn_mul := 1.0 ## rotation_speed x this (TurnState)
+var damage_mul := 1.0 ## this mech's outgoing damage x this (mul_to_damage)
+var fire_delay := 0.0 ## added before each queued bullet (add_to_fire_time)
+
 ## body_name: RobotInfo name. weapon_slot: the slot selected at the start.
 func _init(body_name := "zeid", weapon_slot := Original.START_WEAPON) -> void:
 	body = body_name
@@ -178,6 +203,12 @@ func _init(body_name := "zeid", weapon_slot := Original.START_WEAPON) -> void:
 	life_max = stats.life
 	life = life_max
 	booster_gage = energy_max
+	var shield_id := Bodies.shield_id(body)
+	if shield_id > 0:
+		shield = GameData.weapon(shield_id)
+		shield_max = shield.durability * 10.0
+		shield_recover = shield.mode_num("shield_recover_amount")
+	durability = shield_max
 
 # Death (rcPlayer::update_dead). life <= 0 stops the mech and blocks input; 0.1 s later
 # (time_to_dead_complete) it is fully destroyed.
@@ -203,12 +234,14 @@ func step(intent: Intent, dt: float) -> void:
 		var held := Intent.new()
 		held.aim = pos + Original.vec2_from_deg(facing) * 100.0
 		intent = held
+	_update_states(dt)
 	_update_booster_gauge(intent, dt)
 	_update_move(intent)
 	_update_rotation(intent, dt)
 	_update_physics(dt)
 	_update_dash(intent)
 	_update_map()
+	_update_guard(intent, dt)
 	_update_weapons(intent, dt)
 	booster_warning_time = maxf(0.0, booster_warning_time - dt)
 
@@ -224,6 +257,8 @@ func _update_dead(dt: float) -> bool:
 		attacking = false
 		combo_active = false
 		_last_vel = 0.0
+		if guarding:
+			guard_cancel()
 	if not is_dead_complete:
 		_dead_time -= dt
 		if _dead_time <= 0.0:
@@ -334,7 +369,7 @@ func _update_rotation(intent: Intent, dt: float) -> void:
 	if cur.dot(to_mouse.normalized()) > Original.TURN_SNAP_DOT:
 		return
 	var diff := wrapf(float(target - facing), -180.0, 180.0)
-	var turn := minf(absf(diff), rotation_speed * dt)
+	var turn := minf(absf(diff), rotation_speed * turn_mul * dt)
 	facing = (facing + int(roundf(signf(diff) * maxf(turn, 1.0))) + 360) % 360
 
 ## rcPlayer::update, in the original order: acceleration ticks every 0.1 s and grows
@@ -361,7 +396,7 @@ func _update_physics(dt: float) -> void:
 	elif booster_init_time != 0.0:
 		booster_init_time += dt
 		player_vel -= add_vel
-	player_vel = minf(player_vel, vel_limit)
+	player_vel = minf(player_vel, vel_limit) * move_mul
 	_last_vel = player_vel
 	pos += move_dir * player_vel * dt
 	if _settling:
@@ -402,6 +437,88 @@ func _update_map() -> void:
 	start_dash(BattleMap.wall_bounce_target(crash))
 	wall_crashed.emit(crash["point"], crash["normal"])
 
+## rcPlayerManager::updateguard: Space toggles the guard. Raising it ends a continuous
+## weapon's stream first and needs durability left. rc_Weapon::update for the shield: while
+## the guard is down and the shield is not broken, durability recovers shield_recover_amount
+## a second. A broken shield stays broken (every shield's mode has shield_regeneration 0).
+func _update_guard(intent: Intent, dt: float) -> void:
+	var press := intent.guard and not _prev_guard
+	_prev_guard = intent.guard
+	if shield == null:
+		return
+	if not guarding and durability > 0.0:
+		durability = minf(shield_max, durability + shield_recover * dt)
+	if not press:
+		return
+	if guarding:
+		guard_cancel()
+		return
+	if streaming:
+		streaming = false
+		attacking = false
+	if durability > 0.0:
+		guard_start()
+
+## rcPlayer::guard: also ends a charge weapon's draw (end_weapon_charge).
+func guard_start() -> void:
+	guarding = true
+	if charging:
+		charging = false
+		charge_level = -1
+		charge_changed.emit(-1)
+	guard_changed.emit(true)
+
+func guard_cancel() -> void:
+	guarding = false
+	guard_changed.emit(false)
+
+## World::receive_guard: a blocked hit wears the shield by its damage; at 0 it breaks and the
+## guard drops. Returns true if this block broke it.
+func block(amount: int) -> bool:
+	durability -= amount
+	if durability > 0.0:
+		return false
+	durability = 0.0
+	if guarding:
+		guard_cancel()
+	return true
+
+## World::process_crash: a guarded mech stops what comes at it from the front, where the
+## direction from the mech to the bullet's last position is within the 0.2 dot of its facing.
+func guards_against(from: Vector2) -> bool:
+	if not guarding:
+		return false
+	var to := from - pos
+	if to.length_squared() < 0.0001:
+		return false
+	return Original.vec2_from_deg(facing).dot(to.normalized()) > Original.GUARD_DOT
+
+## World::state_change for the Confusing Beam: down_move_speed, down_rotation_speed,
+## down_damage and down_continuous_time for confusion_time. Every machine applies it, so the
+## one deciding a hit knows the shooter's damage is cut.
+func confuse(w: GameData.Weapon) -> void:
+	confusion_time = w.mode_num("confusion_time")
+	move_mul = w.mode_num("down_move_speed", 1.0)
+	turn_mul = w.mode_num("down_rotation_speed", 1.0)
+	damage_mul = w.mode_num("down_damage", 1.0)
+	fire_delay = w.mode_num("down_continuous_time")
+
+func is_confused() -> bool:
+	return confusion_time > 0.0
+
+func _update_states(dt: float) -> void:
+	if confusion_time > 0.0:
+		confusion_time -= dt
+		if confusion_time <= 0.0:
+			_clear_confusion()
+
+func _clear_confusion() -> void:
+	confusion_time = 0.0
+	move_mul = 1.0
+	turn_mul = 1.0
+	damage_mul = 1.0
+	fire_delay = 0.0
+
 ## rcPlayerManager::update_my_input, number keys: change weapon on the key press, unless the
 ## fire button is held, an attack is still going out, or a combo or charge is under way.
 func _update_weapon_switch(intent: Intent) -> void:
@@ -411,8 +528,11 @@ func _update_weapon_switch(intent: Intent) -> void:
 	if not pressed or intent.fire or _burst_left > 0 or combo_active or streaming or charging:
 		return
 	var slot := key - 1
-	if slot < 0 or slot >= slots.size() or not slots[slot].data.is_supported():
+	if slot < 0 or slot >= slots.size():
 		return
+	# A weapon key while guarding drops the guard first (WEAPON_GUARD_CANCEL).
+	if guarding:
+		guard_cancel()
 	if slot != weapon_index:
 		weapon_index = slot
 		weapon_changed.emit(slot)
@@ -436,7 +556,7 @@ func _update_weapons(intent: Intent, dt: float) -> void:
 				break
 			_burst_left -= 1
 			if _burst_left > 0:
-				_burst_timer += slot.data.fire_interval
+				_burst_timer += slot.data.fire_interval + fire_delay
 	# is_continuous: one round each continuous_time while the button is held, until it is
 	# let go or the ammo runs out (pt_send_continuous_shot_end).
 	if streaming:
@@ -445,7 +565,7 @@ func _update_weapons(intent: Intent, dt: float) -> void:
 			if not _fire_one(slot):
 				streaming = false
 				break
-			_burst_timer += maxf(slot.data.fire_interval, 0.01)
+			_burst_timer += maxf(slot.data.fire_interval, 0.01) + fire_delay
 		if not intent.fire:
 			streaming = false
 		if not streaming:
@@ -481,6 +601,11 @@ func _update_weapons(intent: Intent, dt: float) -> void:
 			sl.recharge = minf(sl.recharge + dt, sl.data.reload)
 	if not press:
 		return
+	# No attack while guarding; a click only sounds shieldused when the weapon is ready.
+	if guarding:
+		if slot.is_ready():
+			shield_clicked.emit()
+		return
 	if slot.data.is_sword():
 		# combo_shoot: a click during a swing queues the next one, up to the last swing clip.
 		if combo_active:
@@ -503,7 +628,7 @@ func _update_weapons(intent: Intent, dt: float) -> void:
 		streaming = true
 		attacking = true
 		slot.recharge = 0.0
-		_burst_timer = slot.data.fire_interval
+		_burst_timer = slot.data.fire_interval + fire_delay
 		attack_started.emit(weapon_index)
 		return
 	_start_burst(slot)
@@ -528,7 +653,7 @@ func _start_burst(slot: Slot) -> void:
 	# shoot() limits the burst to the ammo left.
 	_burst_left = slot.data.fire_num if slot.ammo < 0 else mini(slot.data.fire_num, slot.ammo)
 	_burst_left = maxi(_burst_left, 1)
-	_burst_timer = slot.data.fire_interval
+	_burst_timer = slot.data.fire_interval + fire_delay
 	attack_started.emit(weapon_index)
 
 ## One round: ammo, the gauge, and the event. False when the ammo has run out.
@@ -587,7 +712,7 @@ var _has_snapshot := false
 func snapshot() -> Array:
 	return [pos.x, pos.y, facing, move_dir.x, move_dir.y, _last_vel, int(acc_flag),
 		speed_state, int(attacking), life, booster_gage, int(is_dead_complete), weapon_index,
-		charge_level if charging else -1]
+		charge_level if charging else -1, int(guarding)]
 
 ## Applies an owner's snapshot to a remote copy.
 func apply_snapshot(s: Array) -> void:
@@ -613,6 +738,9 @@ func apply_snapshot(s: Array) -> void:
 		charge_level = int(s[13])
 		charging = charge_level >= 0
 		charge_changed.emit(charge_level)
+	if s.size() > 14 and (int(s[14]) != 0) != guarding:
+		guarding = int(s[14]) != 0
+		guard_changed.emit(guarding)
 	if not _has_snapshot:
 		pos = real_pos
 		_has_snapshot = true
@@ -620,6 +748,7 @@ func apply_snapshot(s: Array) -> void:
 ## rcPlayer::update for remote players: carry the reported position forward at the reported
 ## velocity, then ease the drawn position 10% of the way toward it each tick.
 func step_remote(dt: float) -> void:
+	_update_states(dt)
 	real_pos += move_dir * _last_vel * dt
 	pos += (real_pos - pos) * 0.1
 
@@ -649,6 +778,11 @@ func reset_at(spawn: Vector2, face: int) -> void:
 	charging = false
 	charge_level = -1
 	stun_time = 0.0
+	# Each round is a new game in the original, so the shield starts whole again.
+	durability = shield_max
+	guarding = false
+	_prev_guard = false
+	_clear_confusion()
 	_prev_fire = false
 	_prev_weapon_key = 0
 	_booster_input = BoosterInput.NOTHING

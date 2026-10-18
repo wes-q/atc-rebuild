@@ -31,3 +31,29 @@ const BOW_PUSH := 200.0
 ## rc_bullet::is_crash for an immediate line: segment against the mech's sphere, no width.
 static func line_hits(a: Vector2, b: Vector2, at: Vector2, mech_radius: float) -> bool:
 	return Geometry2D.get_closest_point_to_segment(at, a, b).distance_to(at) <= mech_radius
+
+## World::find_nearest_other_player_index for an X-Mine: the nearest player other than the
+## owner; none if that one is dead or farther than the range (detecting_area, not scaled).
+## players: Array of [id, plane pos, alive]. Returns the id, or 0 for none.
+static func mine_target(owner_id: int, at: Vector2, detect_range: float, players: Array) -> int:
+	var best: Array = []
+	for p in players:
+		if p[0] == owner_id:
+			continue
+		if best.is_empty() or at.distance_squared_to(p[1]) < at.distance_squared_to(best[1]):
+			best = p
+	if best.is_empty() or not best[2] or at.distance_to(best[1]) > detect_range:
+		return 0
+	return best[0]
+
+## World::process_crash for a guarded mech, by the hit's weapon_type: swords and normal
+## bullets are stopped and wear the shield; pierce shots go through; a splash shell's direct
+## hit does splash_damage plus damage x splash_ratio (0 unless the mode sets it).
+enum Guard { BLOCK, THROUGH, SPLASH }
+static func guard_rule(weapon_type: int) -> Guard:
+	match weapon_type:
+		3:
+			return Guard.THROUGH
+		4:
+			return Guard.SPLASH
+	return Guard.BLOCK
