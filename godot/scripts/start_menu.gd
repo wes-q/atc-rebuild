@@ -1,6 +1,7 @@
 class_name StartMenu
 extends CanvasLayer
-## Practice, host or join. Command-line arguments skip this: -- practice, -- host, -- join <ip>.
+## Practice, host or join, and the arena for practice or hosting (the joining player gets the
+## host's). Command-line arguments skip this: -- practice, -- host, -- join <ip>, map=<id>.
 
 signal practice_chosen
 signal host_chosen
@@ -8,6 +9,11 @@ signal join_chosen(address: String)
 
 var _address: LineEdit
 var _message: Label
+var _map: OptionButton
+var _map_ids: Array[String] = []
+
+## Arena picked in the menu, as a map id.
+var map_id := "space"
 
 func _ready() -> void:
 	var shade := ColorRect.new()
@@ -28,6 +34,22 @@ func _ready() -> void:
 	title.add_theme_font_size_override("font_size", 34)
 	title.add_theme_color_override("font_color", Color(0.6, 0.85, 1))
 	box.add_child(title)
+
+	# Room map choice, in the room's order (page_game_room.lua handle_map_select).
+	var map_row := HBoxContainer.new()
+	box.add_child(map_row)
+	var map_label := Label.new()
+	map_label.text = "Map"
+	map_label.custom_minimum_size = Vector2(60, 0)
+	map_row.add_child(map_label)
+	_map = OptionButton.new()
+	_map.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	for entry in BattleMap.list():
+		_map_ids.append(str(entry["id"]))
+		_map.add_item(str(entry["title"]))
+	_map.item_selected.connect(func(i: int) -> void: map_id = _map_ids[i])
+	map_row.add_child(_map)
+	select_map(map_id)
 
 	_button(box, "Practice against a target", func() -> void: practice_chosen.emit())
 	_button(box, "Host a match (player 1)", func() -> void: host_chosen.emit())
@@ -52,6 +74,11 @@ func _button(parent: Control, text: String, action: Callable) -> void:
 	b.text = text
 	b.pressed.connect(action)
 	parent.add_child(b)
+
+func select_map(id: String) -> void:
+	map_id = id
+	if _map and _map_ids.has(id):
+		_map.select(_map_ids.find(id))
 
 func show_message(text: String) -> void:
 	_message.text = text

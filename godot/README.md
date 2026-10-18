@@ -61,6 +61,36 @@ everyone. Remote mechs glide toward their reported position the way the original
 - The next round starts automatically 6 seconds after the results. This part is the
   recreation's own: the original sent players back to a room lobby.
 
+## Arenas (from `test_map.lua`, `rcmap.cpp` and the server)
+
+Pick the arena in the menu, or add `map=<id>` after `--`. The host's choice goes to player 2.
+
+| Map | id | Bounds (x, y) | Walls on the play plane |
+|---|---|---|---|
+| Space | `space` | -1215..1225, -1303..1242 | asteroids, containers, wreckage |
+| City | `city` | -1088..1145, -170..853 | the few rooftops and signs that reach the plane |
+| Sky | `sky` | -1220..1230, -1300..1240 | none |
+| G-Session | `gsession` | -730..650, -630..685 | none |
+| Deep Escape | `escape` | -1215..1225, -1303..1242 | hull edges |
+
+- Each map's model is scaled by 0.3 (`HAHA_SCALE_VAL`), with its own sky and the light values
+  its Lua table sets. An `o:name` frame places `name.x` from the same folder.
+- Frame name prefixes set how a part draws: `(f)` alpha blend, `(a)` additive, `(c0)` no
+  culling, `(z0)` / `(z1)` / `(z2)` depth write and test off, `(b0)` billboard.
+- Walls are built the way `rc_map` built its collision model: every frame except `o:` and
+  `(` frames whose bounding sphere reaches the play plane, keeping only faces steeper than
+  `|n.y| < 0.8`. The map's animation pose at time 0 is used, because the engine kept the
+  animation controller running and its keys override the frames' own scale.
+- Touching a wall pushes the mech 11 units straight out. Leaving the rectangle puts it back
+  on the edge and bounces it 66.3 units along the reflection, with the original `wall_crash`
+  effect. Either way it glides there 10% per frame and ignores movement keys until within 40
+  units, then walks on if a key is held (`start_dash`, `end_dash`).
+- As in the original, only your own mech is collision-checked on your machine. The other
+  player's position comes from their machine.
+- Bullets stop at the first wall they cross.
+- Start points are the server's: twelve around a circle (radius 1000, 600 for G-Session)
+  or the City table, picked at random without repeats each round (`position_set`).
+
 Test options, added after `--`: `netlog` prints positions once a second, `hp=60` starts every
 mech with 60 HP for quick knockouts, `capture=<dir>` saves 30 JPEG frames a second.
 
@@ -117,7 +147,16 @@ parts added to the base stats.
   `data/script/particle`.
 - SR-3 mode 2 (7-shot spray) is defined but not wired. How the original switches modes is not
   traced yet.
-- The rifle's own animation, sounds, the original HUD art and the map's objects are not in yet.
+- The rifle's own animation, sounds and the original HUD art are not in yet.
+- City's sky uses `mount01.png`, which is not in the archive, so that part draws untextured.
+- Starting facing is toward the arena centre. The original's start direction is not in the
+  source we have (inferred).
+- The original's bullet wall test cast its ray backward from the previous position, so it
+  noticed a wall a frame late. Here the bullet stops on the frame it crosses.
+- When a mech touches several wall faces at once, the push uses the nearest one. The
+  original used whichever its collision library reported first.
+- Light strengths are matched by eye; Direct3D's fixed-function lighting has no exact
+  Godot equivalent.
 - The hit effect's scale and growth are inferred.
 - Team mode, more than two players, NPCs, money and grades are not in yet.
 - The character explosion's particles are a stand-in; the original defines them in script.
@@ -134,12 +173,15 @@ scripts/mech_sim.gd      movement, boost gauge, facing, rifle: pure logic, teste
 scripts/mech_view.gd     model, retargeted animations, rifle, the original rotation table
 scripts/bullet.gd        SR-3 rounds
 scripts/game.gd          modes, networking, rounds, hits, camera, target dummy, autopilot
-scripts/battle_world.gd  scenery and effects: sky, grid, booster flames, hits, knockout explosion
+scripts/battle_world.gd  scenery and effects: arena, sky, lights, booster flames, hits, wall crash, explosion
+scripts/battle_map.gd    an arena's bounds, start points, lights and the edge bounce
+scripts/map_collision.gd wall triangles on a plane grid: sphere and segment tests
 scripts/start_menu.gd    practice, host and join menu
 scripts/hud.gd           placeholder readouts
 tools/convert_original.py   .x to glTF converter (reads the archive, writes assets/original)
 tools/extract_db.py         reads game tables straight out of the SQL Server 2000 backup
 tools/inspect_import.gd     prints an imported model's tree and clips
 tools/render_poses.gd       renders the mech at several facings
-tests/test_mech_sim.gd      49 checks against the original database values and rules
+tools/render_map.gd         renders an arena from above with its walls, bounds and start points
+tests/test_mech_sim.gd      67 checks against the original database values and rules
 ```

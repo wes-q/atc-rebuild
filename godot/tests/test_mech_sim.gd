@@ -23,6 +23,11 @@ func _init() -> void:
 	test_knockout_sequence()
 	test_snapshot_carries_knockout()
 	test_reset_revives()
+	test_wall_contact_and_segment()
+	test_walls_stop_a_walking_mech()
+	test_bounds_bounce()
+	test_input_frozen_while_dashing()
+	test_real_maps_load()
 	print("\n%d passed, %d failed" % [passed, failures])
 	quit(1 if failures > 0 else 0)
 
@@ -237,3 +242,95 @@ func test_reset_revives() -> void:
 	sim.reset_at(Vector2(-150, 0), 0)
 	check(not sim.is_dead and not sim.is_dead_complete and sim.life == 700, "reset brings it back at full armour")
 	check(sim.booster_gage == 1900.0 and sim.pos == Vector2(-150, 0), "full gauge, at the spawn point")
+
+# --- Map collision -------------------------------------------------------------------------
+
+## A wall across the plane at x = wall_x, facing -x, from plane y -500 to 500.
+func wall_map(wall_x: float) -> BattleMap:
+	var m := BattleMap.new()
+	m.x_min = -1000.0
+	m.x_max = 1000.0
+	m.y_min = -1000.0
+	m.y_max = 1000.0
+	m.collision.add_triangle(PackedVector3Array([Vector3(wall_x, -100, -500), Vector3(wall_x, 100, -500), Vector3(wall_x, 0, 500)]))
+	m.collision.add_triangle(PackedVector3Array([Vector3(wall_x, -100, 500), Vector3(wall_x, 100, 500), Vector3(wall_x, 0, -500)]))
+	return m
+
+func test_wall_contact_and_segment() -> void:
+	print("map collision (rc_map sphere and ray tests)")
+	var m := wall_map(100.0)
+	var c := m.collision.sphere_contact(Vector2(90, 0), 13.5)
+	check(not c.is_empty() and near(c["normal"].x, -1.0) and near(c["point"].x, 100.0), "a mech 10 from the wall touches it, pushed back toward -x")
+	check(m.collision.sphere_contact(Vector2(80, 0), 13.5).is_empty(), "20 away is clear")
+	var hit: Variant = m.collision.segment_hit(Vector2(50, 10), Vector2(150, 10))
+	check(hit != null and near(hit.x, 100.0, 0.1), "a bullet path through the wall stops at it")
+	check(m.collision.segment_hit(Vector2(10, 0), Vector2(90, 0)) == null, "a path short of the wall is clear")
+
+func test_walls_stop_a_walking_mech() -> void:
+	print("walking and boosting into a wall")
+	var sim := MechSim.new()
+	sim.map = wall_map(100.0)
+	var it := MechSim.Intent.new()
+	it.right = true
+	it.aim = Vector2(1000, 0)
+	var furthest := 0.0
+	for i in 300:
+		it.boost = i > 30
+		sim.step(it, DT)
+		furthest = maxf(furthest, sim.pos.x)
+	check(furthest < 100.0, "never passes the wall (furthest x %.1f)" % furthest)
+	check(sim.pos.x > 60.0, "stays pressed up against it (x %.1f)" % sim.pos.x)
+
+func test_bounds_bounce() -> void:
+	print("arena edge (process_map_bound, crashed_with_wall)")
+	var sim := MechSim.new()
+	var m := BattleMap.new()
+	m.x_min = -200.0
+	m.x_max = 200.0
+	m.y_min = -200.0
+	m.y_max = 200.0
+	sim.map = m
+	var crashes: Array[Vector2] = []
+	sim.wall_crashed.connect(func(at: Vector2, _n: Vector2) -> void: crashes.append(at))
+	sim.reset_at(Vector2(150, 0), 0)
+	var it := MechSim.Intent.new()
+	it.right = true
+	it.aim = Vector2(1000, 0)
+	var furthest := 0.0
+	for i in 60:
+		sim.step(it, DT)
+		furthest = maxf(furthest, sim.pos.x)
+	check(furthest <= 200.0, "held on the edge (furthest x %.1f)" % furthest)
+	check(crashes.size() >= 1 and near(crashes[0].x, 200.0), "wall_crash at the edge point")
+	it.right = false
+	sim.reset_at(Vector2(199.5, 0), 0)
+	it.right = true
+	sim.step(it, DT)
+	it.right = false
+	for i in 120:
+		sim.step(it, DT)
+	check(near(sim.pos.x, 200.0 - Original.WALL_BOUNCE_DISTANCE, 1.0), "bounces 66.3 back inside and settles there (x %.1f)" % sim.pos.x)
+
+func test_input_frozen_while_dashing() -> void:
+	print("dash")
+	var sim := MechSim.new()
+	sim.start_dash(Vector2(100, 0))
+	var it := MechSim.Intent.new()
+	it.up = true
+	sim.step(it, DT)
+	check(sim.dashing and sim.move_dir == Vector2.ZERO, "keys do nothing while dashing")
+	check(near(sim.pos.x, 10.0, 0.01), "eases 10 percent of the way per frame")
+	for i in 10:
+		sim.step(it, DT)
+	check(not sim.dashing and sim.move_dir.y > 0.9, "within 40 the dash ends and a held key walks again")
+
+func test_real_maps_load() -> void:
+	print("converted arenas")
+	var maps := BattleMap.list()
+	check(maps.size() == 5, "five room maps (%d)" % maps.size())
+	for entry in maps:
+		var m := BattleMap.load_map(entry["id"])
+		var inside := true
+		for sp in m.spawns:
+			inside = inside and m.in_bounds(sp) and m.collision.sphere_contact(sp, 13.5).is_empty()
+		check(m.spawns.size() == 12 and inside, "%s: 12 start points, all inside the bounds and clear of walls" % m.title)

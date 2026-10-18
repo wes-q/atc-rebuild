@@ -33,6 +33,12 @@ const CAMERA_FOV := 45.0 ## world.cpp: radFov = pi / 4, 4:3 frustum
 ## mech is in BEHAVE_ATTACK, which lasts until this clip ends (rcPlayer::attack, on_end_animation).
 const ATTACK_TIME := 0.5
 
+# Map collision (rc_map::update, crashed_with_object, crashed_with_wall; rcPlayer::update).
+const OBJECT_PUSH := 1.0 + 50.0 * 0.2 ## dash to pos + normal + normal * (50 * 0.2)
+const WALL_BOUNCE_DISTANCE := 1.7 * 130.0 * 0.3 ## reflected, x HAHA_SCALE_VAL
+const DASH_END_DISTANCE := 40.0 ## end_dash once lastRealPos is this close
+const DASH_EASE := 0.1 ## pos += (lastRealPos - pos) * 0.1 each frame
+
 # --- Animation indices (C++ rcPlayer.cpp Zeid::move, rcPlayer::attack, rcPlayer.h) ---------
 const ANIM_STAND := 1 ## weapon file, clip 1
 const ANIM_ATTACK := 2 ## weapon file, clip 2

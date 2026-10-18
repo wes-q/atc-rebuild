@@ -1,16 +1,20 @@
 class_name BattleWorld
 extends RefCounted
-## Scenery and effects for the battle scene: lights, camera, the original sky, the reference
-## grid, booster flames, hit flashes and the knockout explosion.
+## Scenery and effects for the battle scene: lights, camera, the arena model and its sky,
+## booster flames, hit flashes, wall crashes and the knockout explosion.
 
-const SKY := "res://assets/original/map/b_map01_skymap.gltf"
 const HIT_FLASH := "res://assets/original/zeid/bullet_sr3_boom.gltf"
 const EXPLOSION := "res://assets/original/fx/explo2_result.gltf"
+const WALL_CRASH := "res://assets/original/fx/wall_crash.gltf"
 const SKY_SCALE := 100.0
+## Map model space to Godot: undo Assimp's z mirror, HAHA_SCALE_VAL, then the plane mapping.
+const MAP_BASIS := Basis(Vector3(0.3, 0, 0), Vector3(0, -0.3, 0), Vector3(0, 0, 0.3))
 
 static var _hit_scene: PackedScene
 static var _explosion_scene: PackedScene
+static var _wall_crash_scene: PackedScene
 
+## Environment, light and camera. The arena comes from build_map.
 static func build(root: Node3D, depth: float) -> Dictionary:
 	var env := WorldEnvironment.new()
 	env.environment = Environment.new()
@@ -32,41 +36,115 @@ static func build(root: Node3D, depth: float) -> Dictionary:
 	root.add_child(camera)
 	camera.position = Vector3(0, depth, 0)
 	camera.look_at(Vector3.ZERO, Vector3(0, 0, -1))
+	return {"camera": camera, "env": env, "sun": sun}
 
-	# skybox::render: the original sky model is re-centred on the camera every frame.
-	# Scaled out beyond the arena so it never covers the mechs; from the centre it looks the same.
-	var sky: Node3D = null
-	if ResourceLoader.exists(SKY):
-		sky = (load(SKY) as PackedScene).instantiate() as Node3D
-		sky.name = "Sky"
-		root.add_child(sky)
-		for n in sky.find_children("*", "MeshInstance3D", true, false):
-			var mi := n as MeshInstance3D
-			for i in mi.mesh.get_surface_count():
-				var src := mi.mesh.surface_get_material(i) as StandardMaterial3D
-				var mat := src.duplicate() as StandardMaterial3D if src else StandardMaterial3D.new()
+## rc_map::load: the map model scaled by HAHA_SCALE_VAL, an "o:name" frame placing name.x,
+## the map's sky, and the light values its Lua table sets in init.
+static func build_map(root: Node3D, map: BattleMap, env: WorldEnvironment, sun: DirectionalLight3D) -> Dictionary:
+	var node := Node3D.new()
+	node.name = "Map"
+	root.add_child(node)
+	var model := (load(map.folder + "rac.gltf") as PackedScene).instantiate() as Node3D
+	node.add_child(model)
+	model.transform = Transform3D(MAP_BASIS, Vector3.ZERO)
+	for o in map.objects:
+		var obj := (load(map.folder + str(o["file"])) as PackedScene).instantiate() as Node3D
+		model.add_child(obj)
+		var m: Array = o["matrix"]
+		obj.transform = Transform3D(Basis(Vector3(m[0], m[1], m[2]), Vector3(m[4], m[5], m[6]), Vector3(m[8], m[9], m[10])), Vector3(m[12], m[13], m[14]))
+		apply_frame_flags(obj, false)
+		MechView.play_effect(obj, true)
+	apply_frame_flags(model, false)
+	MechView.play_effect(model, true)
+
+	# skybox::render: the sky model is re-centred on the camera every frame. Scaled out beyond
+	# the arena so it never covers the mechs; from the centre it looks the same.
+	var sky := (load(map.folder + "skymap.gltf") as PackedScene).instantiate() as Node3D
+	sky.name = "Sky"
+	node.add_child(sky)
+	apply_frame_flags(sky, true)
+	MechView.play_effect(sky, true)
+
+	# client_global light values, D3D direction mapped to Godot like any other vector.
+	var d := map.light_direction
+	var dir := Vector3(d.x, -d.y, -d.z).normalized()
+	sun.look_at_from_position(Vector3.ZERO, dir, Vector3(0, 0, -1) if absf(dir.y) < 0.99 else Vector3(1, 0, 0))
+	var diffuse := map.light_diffuse
+	var peak := maxf(diffuse.x, maxf(diffuse.y, diffuse.z))
+	sun.light_color = Color(diffuse.x / peak, diffuse.y / peak, diffuse.z / peak)
+	sun.light_energy = peak * LIGHT_SCALE
+	var a := map.light_ambient
+	env.environment.ambient_light_color = Color(a.x, a.y, a.z)
+	env.environment.ambient_light_energy = AMBIENT_SCALE
+	return {"node": node, "sky": sky}
+
+## D3D fixed-function light values to Godot light energy, matched by eye against the
+## original's screenshots.
+const LIGHT_SCALE := 0.6
+const AMBIENT_SCALE := 1.6
+
+## Model::frame properties from a frame name prefix like "(az0)": f alpha blend, a additive,
+## c0 no culling, z0 no depth write, z1 no depth test, z2 both, b0 billboard.
+static func apply_frame_flags(scene: Node, unshaded: bool) -> void:
+	for n in scene.find_children("*", "MeshInstance3D", true, false):
+		var mi := n as MeshInstance3D
+		var flags := frame_flags(str(mi.name))
+		for i in mi.mesh.get_surface_count():
+			var src := mi.mesh.surface_get_material(i) as StandardMaterial3D
+			var mat := src.duplicate() as StandardMaterial3D if src else StandardMaterial3D.new()
+			if unshaded:
 				mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 				mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-				if str(mi.name).begins_with("(z)") or str(mi.name).begins_with("(a)"):
-					mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
-				mi.set_surface_override_material(i, mat)
-		MechView.play_effect(sky, true)
-		place_sky(sky, camera)
+			if flags.has("f"):
+				mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+			if flags.has("a"):
+				mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+				mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+				mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+				mat.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED
+			if flags.has("c0"):
+				mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+			if flags.has("z0") or flags.has("z2"):
+				mat.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED
+			if flags.has("z1") or flags.has("z2"):
+				mat.no_depth_test = true
+			if flags.has("b0"):
+				mat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+			mi.set_surface_override_material(i, mat)
 
-	# Faint reference grid on the plane so movement reads against something. Not original art.
-	var grid := MeshInstance3D.new()
-	var plane := PlaneMesh.new()
-	plane.size = Vector2(4000, 4000)
-	grid.mesh = plane
-	var gmat := ShaderMaterial.new()
-	gmat.shader = load("res://scripts/grid.gdshader")
-	grid.material_override = gmat
-	grid.position = Vector3(0, -20, 0)
-	root.add_child(grid)
-	return {"camera": camera, "sky": sky}
+static func frame_flags(frame_name: String) -> Array[String]:
+	var out: Array[String] = []
+	if not frame_name.begins_with("("):
+		return out
+	var i := 1
+	while i < frame_name.length() and frame_name[i] != ")":
+		var ch := frame_name[i]
+		if ch in ["c", "z", "b"] and i + 1 < frame_name.length() and frame_name[i + 1].is_valid_int():
+			out.append(ch + frame_name[i + 1])
+			i += 1
+		elif ch in ["f", "a"]:
+			out.append(ch)
+		i += 1
+	return out
 
 static func place_sky(sky: Node3D, camera: Camera3D) -> void:
-	sky.transform = Transform3D(MechView.G * Basis.from_scale(Vector3(1, 1, -1) * SKY_SCALE), camera.position)
+	sky.global_transform = Transform3D(MechView.G * Basis.from_scale(Vector3(1, 1, -1) * SKY_SCALE), camera.position)
+
+## rc_map::crashed_with_wall: weapon/wall_crash.x launched from the edge point, facing out
+## along the wall normal with up toward the camera.
+static func wall_crash(root: Node3D, at: Vector2, normal: Vector2) -> void:
+	if _wall_crash_scene == null:
+		_wall_crash_scene = load(WALL_CRASH)
+	var fx := _wall_crash_scene.instantiate() as Node3D
+	root.add_child(fx)
+	var z := Vector3(normal.x, 0, normal.y).normalized()
+	var y := Vector3(0, -1, 0)
+	var x := y.cross(z).normalized()
+	var b := MechView.G * Basis(x, y, z) * Basis.from_scale(Vector3(1, 1, -1)) * Basis.from_scale(Vector3.ONE * Original.SCALE)
+	fx.transform = Transform3D(b, Original.to_godot(at))
+	MechView.play_effect(fx, false)
+	var timer := fx.get_tree().create_timer(1.0)
+	timer.timeout.connect(fx.queue_free)
 
 ## Bullet impact, also used for the low-health sparks (rcPlayer::update part_explosion).
 static func hit_flash(root: Node3D, at: Vector2, size := 1.0) -> void:

@@ -14,11 +14,10 @@ extends Node3D
 ##   godot --path godot -- practice         target dummy
 ##   godot --path godot -- host             player 1, waits on port 7777
 ##   godot --path godot -- join 127.0.0.1   player 2
-## Add "autopilot" to any of these for the scripted duel, "netlog" for position logs.
+## Add "map=<id>" (space, city, sky, gsession, escape) to pick the arena, "autopilot" for the
+## scripted duel, "netlog" for position logs.
 
 const PORT := 7777
-const SPAWNS := [Vector2(-150, 0), Vector2(150, 0)]
-const SPAWN_FACING := [0, 180]
 const DUMMY_ID := -1
 const RESULT_DELAY := 1.5 ## after the last knockout, so the explosion plays first
 const RESULT_TIME := 6.0 ## results on screen before the next round
@@ -45,6 +44,14 @@ class Stats:
 
 var camera: Camera3D
 var sky: Node3D
+var env: WorldEnvironment
+var sun: DirectionalLight3D
+var map: BattleMap
+var map_node: Node3D
+## Arena for practice and hosting. A joining player uses the host's.
+var map_choice := "space"
+## Start point index per slot this round (RayCrashServer::position_set: random, no repeats).
+var spawn_points: Array[int] = [0, 1]
 var hud: Hud
 var menu: StartMenu
 var mechs: Dictionary = {} ## id -> Mech
@@ -75,7 +82,11 @@ var _log_timer := 0.0
 func _ready() -> void:
 	var built := BattleWorld.build(self, depth)
 	camera = built.camera
-	sky = built.sky
+	env = built.env
+	sun = built.sun
+	var map_arg := _arg_str("map=")
+	if map_arg != "":
+		map_choice = map_arg
 	hud = Hud.new()
 	add_child(hud)
 	multiplayer.peer_connected.connect(_on_peer_connected)
@@ -123,12 +134,55 @@ func _show_menu(message: String) -> void:
 		menu.practice_chosen.connect(start_practice)
 		menu.host_chosen.connect(start_host)
 		menu.join_chosen.connect(start_join)
+		menu.select_map(map_choice)
 	menu.visible = true
 	menu.show_message(message)
 
 func _hide_menu() -> void:
 	if menu:
 		menu.visible = false
+		map_choice = menu.map_id
+
+## Builds the arena if it is not the one already showing.
+func _use_map(id: String) -> void:
+	if map and map.id == id:
+		return
+	var next := BattleMap.load_map(id)
+	if next == null:
+		return
+	if map_node:
+		map_node.queue_free()
+	map = next
+	var built := BattleWorld.build_map(self, map, env, sun)
+	map_node = built.node
+	sky = built.sky
+	for m: Mech in mechs.values():
+		_attach_map(m)
+
+## The original ran map collision for the local player only (rc_map::update).
+func _attach_map(m: Mech) -> void:
+	m.sim.map = map if (m.local or m.id == DUMMY_ID) else null
+
+## Random distinct start points for each slot, like position_set for a free-for-all room.
+func _pick_spawns() -> Array[int]:
+	var order: Array[int] = []
+	for i in map.spawns.size():
+		order.append(i)
+	order.shuffle()
+	return order.slice(0, 2)
+
+func _spawn_pos(slot: int) -> Vector2:
+	if map == null or map.spawns.is_empty():
+		return Vector2(-150 + 300 * slot, 0)
+	return map.spawns[spawn_points[slot] % map.spawns.size()]
+
+## Facing toward the arena centre. The original's start direction is not in the source we
+## have (inferred).
+func _spawn_facing(slot: int) -> int:
+	var p := _spawn_pos(slot)
+	var centre := Vector2((map.x_min + map.x_max) * 0.5, (map.y_min + map.y_max) * 0.5) if map else Vector2.ZERO
+	var to := centre - p
+	return Original.deg_from_vec2(to.x, to.y) if to.length_squared() > 1.0 else 0
 
 func _set_mode(m: String) -> void:
 	mode = m
@@ -139,11 +193,12 @@ func start_practice() -> void:
 	_reset_world()
 	_set_mode("practice")
 	_hide_menu()
+	_use_map(map_choice)
 	local_id = 1
 	_spawn(local_id, 0, true)
 	_spawn(DUMMY_ID, 1, false)
-	_status = "Practice. Esc: menu"
-	_begin_round(1)
+	_status = "Practice on %s. Esc: menu" % map.title
+	_begin_round(1, map.id, _pick_spawns())
 
 func start_host() -> void:
 	_reset_world()
@@ -155,9 +210,10 @@ func start_host() -> void:
 	multiplayer.multiplayer_peer = peer
 	_set_mode("host")
 	_hide_menu()
+	_use_map(map_choice)
 	local_id = multiplayer.get_unique_id()
 	_spawn(local_id, 0, true)
-	_status = "Hosting on %s port %d. Waiting for player 2." % [", ".join(_lan_addresses()), PORT]
+	_status = "Hosting %s on %s port %d. Waiting for player 2." % [map.title, ", ".join(_lan_addresses()), PORT]
 
 func start_join(address: String) -> void:
 	_reset_world()
@@ -209,8 +265,10 @@ func _unhandled_input(event: InputEvent) -> void:
 
 # --- Rounds -----------------------------------------------------------------------------
 
-## Everyone back to their spawn at full health, tallies cleared, clock from zero.
-func _begin_round(number: int) -> void:
+## Everyone back to a start point at full health, tallies cleared, clock from zero.
+func _begin_round(number: int, map_id: String, spawns: Array[int]) -> void:
+	_use_map(map_id)
+	spawn_points = spawns
 	round_number = number
 	round_active = true
 	round_time = 0.0
@@ -219,7 +277,7 @@ func _begin_round(number: int) -> void:
 	_clear_bullets()
 	stats.clear()
 	for m: Mech in mechs.values():
-		m.sim.reset_at(SPAWNS[m.slot], SPAWN_FACING[m.slot])
+		m.sim.reset_at(_spawn_pos(m.slot), _spawn_facing(m.slot))
 		if _test_hp > 0:
 			m.sim.life_max = _test_hp
 			m.sim.life = _test_hp
@@ -228,11 +286,26 @@ func _begin_round(number: int) -> void:
 		m.view.visible = true
 		m.view.play_stand()
 		stats[m.id] = Stats.new()
+		if m.local:
+			# Start points are far apart, so the camera starts on the mech instead of gliding there.
+			cam_from = Vector3(m.sim.pos.x, -depth, m.sim.pos.y)
+			_update_camera(m, 0.0)
 	hud.hide_result()
 
 @rpc("authority", "call_remote", "reliable")
-func _net_round_start(number: int) -> void:
-	_begin_round(number)
+func _net_round_start(number: int, map_id: String, spawns: Array) -> void:
+	var typed: Array[int] = []
+	for i in spawns:
+		typed.append(int(i))
+	_begin_round(number, map_id, typed)
+
+## Host or practice: next round on the same arena, fresh start points.
+func _start_next_round() -> void:
+	var next := round_number + 1
+	var spawns := _pick_spawns()
+	_begin_round(next, map.id, spawns)
+	if mode == "host":
+		_net_round_start.rpc(next, map.id, spawns)
 
 ## Host (or practice): ends the round once one mech or none is left standing.
 func _check_round_end() -> void:
@@ -312,10 +385,11 @@ func _on_peer_connected(id: int) -> void:
 	if not mechs.has(id):
 		_spawn(id, 0 if id == 1 else 1, false)
 	if mode == "host":
-		_status = "Player 2 joined."
+		_status = "Player 2 joined. %s." % map.title
 		var next := round_number + 1
-		_begin_round(next)
-		_net_round_start.rpc_id(id, next)
+		var spawns := _pick_spawns()
+		_begin_round(next, map.id, spawns)
+		_net_round_start.rpc_id(id, next, map.id, spawns)
 
 func _on_peer_disconnected(id: int) -> void:
 	_remove_mech(id)
@@ -356,7 +430,8 @@ func _spawn(id: int, slot: int, local: bool) -> void:
 	m.slot = slot
 	m.local = local
 	m.sim = MechSim.new()
-	m.sim.reset_at(SPAWNS[slot], SPAWN_FACING[slot])
+	m.sim.reset_at(_spawn_pos(slot), _spawn_facing(slot))
+	_attach_map(m)
 	m.view = MechView.new()
 	add_child(m.view)
 	m.view.set_skin(slot)
@@ -364,6 +439,7 @@ func _spawn(id: int, slot: int, local: bool) -> void:
 		m.fx.append(BattleWorld.booster_flame(p))
 	if local:
 		m.sim.fired.connect(func(_o: Vector2, deg: int) -> void: _on_local_fired(m, deg))
+		m.sim.wall_crashed.connect(func(at: Vector2, normal: Vector2) -> void: BattleWorld.wall_crash(self, at, normal))
 		cam_from = Vector3(m.sim.pos.x, -depth, m.sim.pos.y)
 	mechs[id] = m
 	stats[id] = Stats.new()
@@ -414,10 +490,7 @@ func _physics_process(dt: float) -> void:
 	if _next_round_timer >= 0.0:
 		_next_round_timer -= dt
 		if _next_round_timer < 0.0:
-			var next := round_number + 1
-			_begin_round(next)
-			if mode == "host":
-				_net_round_start.rpc(next)
+			_start_next_round()
 	if _netlog:
 		_log_timer += dt
 		if _log_timer >= 1.0:
@@ -525,8 +598,15 @@ func _add_bullet(origin: Vector2, deg: int, shooter: Mech) -> void:
 func _step_bullets(dt: float) -> void:
 	for i in range(bullets.size() - 1, -1, -1):
 		var b := bullets[i]
+		var prev := b.plane_pos
 		var alive := b.advance(dt)
 		var shooter: int = b.get_meta("shooter")
+		# World::update: a bullet that meets a wall stops there (rc_map::is_crashed_with_object).
+		if map:
+			var wall: Variant = map.collision.segment_hit(prev, b.plane_pos)
+			if wall != null:
+				alive = false
+				BattleWorld.hit_flash(self, wall)
 		for m: Mech in mechs.values():
 			if not alive:
 				break

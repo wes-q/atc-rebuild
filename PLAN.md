@@ -33,8 +33,8 @@ What the archive contains: `docs/archive-inventory.md`.
 | 1 | Zeid walking, boosting and firing the SR-3 on the original numbers | Done |
 | 2 | Two players over the network | Done |
 | 3 | Damage, knockouts and rounds | Done |
-| 4 | A real battle map: scenery and collision grid | Next |
-| 5 | Sound and the original HUD art | |
+| 4 | A real battle map: scenery and collision grid | Done |
+| 5 | Sound and the original HUD art | Next |
 | 6 | The Zeid's other weapons: sword combos, missiles, SR-3 mode 2 | |
 | 7 | The other four bodies | |
 

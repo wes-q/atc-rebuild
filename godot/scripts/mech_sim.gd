@@ -25,6 +25,8 @@ class Intent:
 signal fired(origin: Vector2, deg: int)
 ## Fully destroyed: is_dead_complete in rcPlayer::update_dead. The mech stops being drawn.
 signal exploded
+## Pushed back off the arena edge (rc_map::crashed_with_wall), for the wall_crash effect.
+signal wall_crashed(point: Vector2, normal: Vector2)
 
 # Stats from the original database, via GameData.
 var stats: GameData.Robot
@@ -56,6 +58,16 @@ var booster_gage := 0.0
 var booster_warning_time := 0.0
 var life := 0
 var speed_state := 0 ## last move protocol speed: 0 stop, 1 move, 2 boost
+var previous_pos := Vector2.ZERO
+
+# Map collision. The original ran it for the local player only (rc_map::update), so remote
+# copies just show where their owner put them.
+var map: BattleMap
+## Pushed by a wall: input is ignored until close to the dash point (is_my_player_dashing).
+var dashing := false
+var _dash_target := Vector2.ZERO
+## recv_stop left lastRealPos at the dash point, so a mech left standing keeps easing there.
+var _settling := false
 
 # Booster_Input_Catcher.
 enum BoosterInput { NOTHING, COUNT, BOOST_START, BOOST, BOOST_END }
@@ -108,10 +120,13 @@ func take_damage(amount: int) -> bool:
 func step(intent: Intent, dt: float) -> void:
 	if _update_dead(dt):
 		return
+	previous_pos = pos
 	_update_booster_gauge(intent, dt)
 	_update_move(intent)
 	_update_rotation(intent, dt)
 	_update_physics(dt)
+	_update_dash(intent)
+	_update_map()
 	_update_rifle(intent, dt)
 	booster_warning_time = maxf(0.0, booster_warning_time - dt)
 
@@ -156,6 +171,10 @@ func _update_move(intent: Intent) -> void:
 		went_down = went_down or (keys[i] and not _prev_keys[i])
 		went_up = went_up or (not keys[i] and _prev_keys[i])
 	_prev_keys = keys
+
+	# rcPlayerManager::updatemove: no move input until a dash has fully ended.
+	if dashing:
+		return
 
 	var by_speed := 2 if intent.boost else 1
 	var md := intent.move_dir()
@@ -205,6 +224,8 @@ func _advance_booster_input(pressed: bool) -> int:
 ## Local echo of a move message: recv_move for speed 1 and 2, recv_stop for 0.
 func _send_move(deg: int, speed: int) -> void:
 	speed_state = speed
+	if speed != 0:
+		_settling = false
 	if speed == 0:
 		acc_flag = false
 		move_dir = Vector2.ZERO
@@ -259,6 +280,43 @@ func _update_physics(dt: float) -> void:
 	player_vel = minf(player_vel, vel_limit)
 	_last_vel = player_vel
 	pos += move_dir * player_vel * dt
+	if _settling:
+		pos += (_dash_target - pos) * Original.DASH_EASE
+
+## rcPlayer::start_dash with bstop, as echoed back by the server: recv_dash, then recv_stop
+## with the destination as lastRealPos.
+func start_dash(dest: Vector2) -> void:
+	_send_move(0, 0)
+	_dash_target = dest
+	dashing = true
+	_settling = true
+
+## rcPlayer::end_dash: once close, give control back and resume walking if a key is held.
+func _update_dash(intent: Intent) -> void:
+	if not dashing or pos.distance_to(_dash_target) > Original.DASH_END_DISTANCE:
+		return
+	dashing = false
+	if intent.any_move():
+		_send_move(_deg(intent), 1)
+
+## rc_map::update: wall triangles first, then the arena rectangle.
+func _update_map() -> void:
+	if map == null:
+		return
+	var contact := map.collision.sphere_contact(pos, crash_radius)
+	if not contact.is_empty():
+		# crashed_with_object: a short push straight out of the wall.
+		start_dash(pos + contact["normal"] * Original.OBJECT_PUSH)
+		return
+	# process_map_bound: ignored while dashing from outside to outside.
+	if dashing and not map.in_bounds(pos) and not map.in_bounds(previous_pos):
+		return
+	var crash := map.bound_crash(pos, previous_pos)
+	if crash.is_empty():
+		return
+	pos = crash["point"]
+	start_dash(BattleMap.wall_bounce_target(crash))
+	wall_crashed.emit(crash["point"], crash["normal"])
 
 ## rcWeaponMode::fire queues continuous_number bullets, each continuous_time after the last
 ## (rc_Weapon::update_bullet). Recharge waits re_load_time and pauses during the fire animation.
@@ -361,3 +419,6 @@ func reset_at(spawn: Vector2, face: int) -> void:
 	attacking = false
 	_booster_input = BoosterInput.NOTHING
 	_prev_keys = [false, false, false, false]
+	previous_pos = spawn
+	dashing = false
+	_settling = false
