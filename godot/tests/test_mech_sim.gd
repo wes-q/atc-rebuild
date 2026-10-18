@@ -66,6 +66,7 @@ func _init() -> void:
 	test_lan_rooms()
 	test_room_pages()
 	test_shop_page()
+	test_state_rate()
 	print("\n%d passed, %d failed" % [passed, failures])
 	quit(1 if failures > 0 else 0)
 
@@ -1342,3 +1343,26 @@ func test_shop_page() -> void:
 	fe.free()
 	OriginalUI.release_statics()
 	DirAccess.remove_absolute(ProjectSettings.globalize_path("user://test_profile.cfg"))
+
+func test_state_rate() -> void:
+	print("movement send rate by players (step 16)")
+	check(Room.state_rate(2) == 60 and Room.state_rate(4) == 60, "2 to 4 players: 60 a second")
+	check(Room.state_rate(5) == 30 and Room.state_rate(8) == 30, "5 to 8 players: 30 a second")
+	check(Room.state_rate(9) == 20 and Room.state_rate(12) == 20, "9 to 12 players: 20 a second")
+	check(Room.state_rate(12, true) == 60, "the master's override keeps 60 a second")
+	check(roundi(60 / float(Room.state_rate(6))) == 2 and roundi(60 / float(Room.state_rate(10))) == 3,
+		"at 60 physics ticks a second: every 2nd tick, every 3rd tick")
+	# Between states a remote copy carries on along its last direction and speed.
+	var owner := MechSim.new("zeid", 1)
+	owner.reset_at(Vector2.ZERO, 0)
+	var remote := MechSim.new("zeid", 1)
+	remote.reset_at(Vector2.ZERO, 0)
+	var it := MechSim.Intent.new()
+	it.right = true
+	for i in 30:
+		owner.step(it, 1.0 / 60.0)
+	remote.apply_snapshot(owner.snapshot())
+	var at := remote.real_pos
+	remote.step_remote(1.0 / 60.0)
+	remote.step_remote(1.0 / 60.0)
+	check(remote.real_pos.x > at.x and is_equal_approx(remote.real_pos.y, at.y), "a remote mech keeps moving between states")

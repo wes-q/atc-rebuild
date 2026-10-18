@@ -198,12 +198,58 @@ godot --path godot -- practice              # alone, against a target dummy
 - Esc leaves the room for the room list.
 
 How it works, following the original client: each player runs their own mech and sends its
-state 60 times a second, tagged with the round so a late state from the last round cannot
-end the new one. The host keeps the slot list and sends it to everyone when it changes.
+state (60 times a second in a small room, fewer in a big one; below), tagged with the round so
+a late state from the last round cannot end the new one. The host keeps the slot list and sends it to everyone when it changes.
 Shots go out as events, so every screen shows every bullet. The
 player who is hit decides the damage (the SR-3's database setting), then reports it to
 everyone. Remote mechs glide toward their reported position the way the original eased toward
-`lastRealPos`.
+`lastRealPos`, and carry on along their last direction and speed between states.
+
+**Movement updates by room size** (Step 16, this recreation's own): the host relays every
+player's state to every other player, so its upload grows with about the square of the
+player count. To keep a full room within a home connection, every machine sends fewer states
+as the room fills, going by the host's player list:
+
+| Players | States a second | Host upload, measured |
+|---|---|---|
+| 2 to 4 | 60 | 4 players: about 112 KB/s (0.9 Mbit/s) |
+| 5 to 8 | 30 | 8 players: about 310 KB/s (2.5 Mbit/s) |
+| 9 to 12 | 20 | 12 players: about 480 KB/s (3.9 Mbit/s) |
+
+Measured with autopilot players on one computer, from ENet's own count of what the host sent
+in battle, shots included; about 210 bytes per state relayed. At 60 a second, 12 players
+would need about 1.45 MB/s (12 Mbit/s). Only remote mechs' position, facing and status come
+less often: shots, swings, hits, guard and round events are separate messages and are never
+held back. The room's System line says when the rate changes. The room master can keep 60 a
+second for a big LAN game by typing `/rate full` in the room chat (`/rate auto` goes back;
+`/rate` says the current rate), or start the host with `fullrate` on the command line.
+
+## Playing over the internet with Tailscale
+
+The room list only finds rooms on the same network: broadcasts do not cross the internet or
+Tailscale. Friends elsewhere join by address, and Tailscale gives everyone a private address
+without opening ports on the router.
+
+1. Everyone installs Tailscale (tailscale.com, or the App Store and Play Store) and signs in.
+   Then either invite your friends into your tailnet, or share the host's computer with them
+   from Tailscale's admin console. They need to reach the host only.
+2. The host creates a room. The room chat lists the host's addresses; the Tailscale one starts
+   with `100.` (or run `tailscale ip -4` on the host).
+3. Everyone else types that address in the room list's Quick Go name box and presses GO (with
+   the room's password, if it has one).
+4. Check the connection from a joining computer: `tailscale ping 100.x.y.z`. "via" an IP
+   address and port means direct; "via DERP(...)" means Tailscale's relay servers are carrying
+   the traffic, which adds delay and can limit a full room. `tailscale status` shows the same
+   for every device: "direct" or "relay". A relayed connection often turns direct after a few
+   pings; if it stays relayed, a different host or network may do better.
+5. The host should be the player with the best upload speed, ideally on a computer rather than
+   a phone: a 12-player room needs about 4 Mbit/s of upload (table above), more with
+   `/rate full`. Everyone else uploads only their own mech's states (about 13 KB/s at 60 a
+   second, 4 KB/s at 20) and downloads the others' (about 46 KB/s in a 12-player room).
+
+The first time a Mac hosts, allow Godot to accept incoming connections when macOS asks.
+Without Tailscale, the host can forward UDP port 7777 on their router and give out their
+public address instead, which opens that port to anyone on the internet.
 
 ## Match rules (from the original server and client)
 
@@ -311,7 +357,9 @@ enters both command combos with a sword. For hosting: `players=4` starts the cou
 four are in (and again after each battle), `room=<name>` names the room, `tab` keeps the Tab
 panel open. `name=<player>` plays under another name without saving it, and
 `profile=<name>` keeps the name, options and loadouts in `user://<name>.cfg` instead of your
-own profile (the demo tools use it). `netlog` lines show each mech's weapons.
+own profile (the demo tools use it). `netlog` lines show each mech's weapons and, on the host,
+its upload and movement rate; room System notices print too. `fullrate` keeps hosting at 60
+states a second.
 
 ## Controls (as in the original)
 
@@ -651,7 +699,8 @@ parts added to the base stats.
   GAME ROOM and CHANNEL buttons is not built yet.
 - NPCs, observers, money, grades and paint items are not in yet. Points leave out the
   grade-based team averages and loser penalties, which need grades.
-- No lag compensation. Fine on a home network, untested over the internet.
+- No lag compensation. Fine on a home network; over the internet it depends on the
+  connection (above), and it has not been tried between distant players yet.
 
 ## Layout
 
@@ -689,5 +738,5 @@ tools/ui_demo.gd            drives the front end with synthetic input, for check
 tools/room_demo.gd          joins a room another copy hosts, through the room list, with synthetic input
 tools/shop_demo.gd          equips a weapon in the item shop with synthetic input
 tools/extract_ui.py         reads the HUD window tables and particle scripts, copies their art
-tests/test_mech_sim.gd      275 checks against the original database values and rules
+tests/test_mech_sim.gd      281 checks against the original database values and rules
 ```
