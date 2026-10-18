@@ -28,6 +28,7 @@ const CHARACTER_BLOCK := "res://assets/original/x/weapon/character_block.gltf"
 const SHIELD_CRASH := "res://assets/original/x/weapon/shield_crash.gltf"
 ## The combo flashes have no clip of their own to time them (inferred).
 const COMBO_EFFECT_TIME := 1.0
+const DEFENCE_DOWN := "res://assets/original/x/weapon01/defence_down.gltf"
 const RESULT_DELAY := 1.5 ## after the last knockout, so the explosion plays first
 const RESULT_TIME := 6.0 ## results on screen before the next round
 
@@ -37,6 +38,8 @@ class Mech:
 	var sim: MechSim
 	var view: MechView
 	var body := "zeid"
+	## Equipped weapons in slot order, as the owner chose them (empty: the body's defaults).
+	var weapons: Array = []
 	var local := false
 	## Room.NONE in free-for-all, Room.RED or Room.BLUE in team battle (from the slot).
 	var team := Room.NONE
@@ -100,6 +103,9 @@ var swings: Array = []
 var beams: Array[Beam] = []
 ## The body for practice and hosting or joining, and the practice target's.
 var body_choice := "zeid"
+## Your four weapons in slot order (sword, gun, heavy, special), from the menu or
+## loadout=1,3,4,17; empty for the body's defaults.
+var loadout_choice: Array = []
 var dummy_body := ""
 ## is_skip_crash rounds fired so far, by shooter (only 1 in skip_crash_count + 1 can hit).
 var _skip_counter := {}
@@ -152,6 +158,10 @@ func _ready() -> void:
 	var body_arg := _arg_str("body=")
 	if body_arg in Bodies.NAMES:
 		body_choice = body_arg
+	var loadout_arg := _arg_str("loadout=")
+	if loadout_arg != "":
+		for part in loadout_arg.split(","):
+			loadout_choice.append(int(part))
 	var dummy_arg := _arg_str("dummy=")
 	if dummy_arg in Bodies.NAMES:
 		dummy_body = dummy_arg
@@ -219,7 +229,7 @@ func _show_menu(message: String) -> void:
 		menu.host_chosen.connect(start_host)
 		menu.join_chosen.connect(start_join)
 		menu.select_map(map_choice)
-		menu.select_body(body_choice)
+		menu.select_body(body_choice, loadout_choice)
 		menu.select_mode(team_mode)
 	menu.visible = true
 	menu.show_message(message)
@@ -233,6 +243,7 @@ func _hide_menu() -> void:
 		menu.visible = false
 		map_choice = menu.map_id
 		body_choice = menu.body_id
+		loadout_choice = menu.loadout
 		team_mode = menu.team_mode
 
 ## Builds the arena if it is not the one already showing.
@@ -289,7 +300,7 @@ func start_practice() -> void:
 	team_mode = false
 	_use_map(map_choice)
 	local_id = 1
-	_spawn(local_id, 0, true, body_choice)
+	_spawn(local_id, 0, true, body_choice, loadout_choice)
 	_spawn(DUMMY_ID, 1, false, dummy_body if dummy_body != "" else _random_other_body(body_choice))
 	_status = "Practice on %s. %s: menu" % [map.title, _key("Esc", "MENU")]
 	_begin_round(1, map.id, _pick_spawns())
@@ -307,7 +318,7 @@ func start_host() -> void:
 	_use_map(map_choice)
 	local_id = multiplayer.get_unique_id()
 	roster = {local_id: 0}
-	_spawn(local_id, 0, true, body_choice)
+	_spawn(local_id, 0, true, body_choice, loadout_choice)
 	_host_status()
 
 func start_join(address: String) -> void:
@@ -610,7 +621,10 @@ func _net_roster(list: Dictionary, number: int, active: bool, map_id: String, sp
 		round_active = active
 	for id: int in roster:
 		if not mechs.has(id):
-			_spawn(id, int(roster[id]), id == local_id, body_choice if id == local_id else "zeid")
+			if id == local_id:
+				_spawn(id, int(roster[id]), true, body_choice, loadout_choice)
+			else:
+				_spawn(id, int(roster[id]), false)
 			# Whoever is new sits out a round already under way; those already playing send
 			# their own state.
 			if active and (id == local_id or not first):
@@ -699,11 +713,15 @@ func _net_state(state: Array) -> void:
 	# which would end the new round at once.
 	if int(state[state.size() - 1]) != round_number:
 		return
-	# The owner's body: rebuild their mech when it differs from what we drew.
+	# The owner's body and loadout (the room's EquipItem): rebuild their mech when either
+	# differs from what we drew.
 	var body_index := int(state[state.size() - 2])
-	if body_index >= 0 and body_index < Bodies.NAMES.size() and Bodies.NAMES[body_index] != m.body:
-		_respawn_body(m, Bodies.NAMES[body_index])
-	m.lock_target = int(state[state.size() - 3])
+	var weapons: Array = state[state.size() - 3]
+	if body_index >= 0 and body_index < Bodies.NAMES.size():
+		var body: String = Bodies.NAMES[body_index]
+		if body != m.body or Bodies.loadout(body, weapons) != Array(m.weapons, TYPE_INT, "", null):
+			_respawn_body(m, body, weapons)
+	m.lock_target = int(state[state.size() - 4])
 	m.sim.apply_snapshot(state)
 
 ## A shot, from the shooter's muzzle. Reliable so both screens show every bullet.
@@ -749,7 +767,7 @@ func _net_hit(attacker: int, amount: int, remaining: int, weapon_id: int) -> voi
 
 # --- Mechs ------------------------------------------------------------------------------
 
-func _spawn(id: int, slot: int, local: bool, body := "zeid") -> void:
+func _spawn(id: int, slot: int, local: bool, body := "zeid", weapons: Array = []) -> void:
 	var m := Mech.new()
 	m.id = id
 	m.slot = slot
@@ -757,17 +775,18 @@ func _spawn(id: int, slot: int, local: bool, body := "zeid") -> void:
 	m.local = local
 	mechs[id] = m
 	stats[id] = Stats.new()
-	_build_body(m, body)
+	_build_body(m, body, weapons)
 	m.sim.reset_at(_spawn_pos(slot), _spawn_facing(slot))
 	if local:
 		cam_from = Vector3(m.sim.pos.x, -depth, m.sim.pos.y)
 
-## The mech's simulation and model for a body, with their events wired.
-func _build_body(m: Mech, body: String) -> void:
+## The mech's simulation and model for a body and loadout, with their events wired.
+func _build_body(m: Mech, body: String, weapons: Array = []) -> void:
 	m.body = body
-	m.sim = MechSim.new(body)
+	m.weapons = Bodies.loadout(body, weapons)
+	m.sim = MechSim.new(body, Original.START_WEAPON, m.weapons)
 	_attach_map(m)
-	m.view = MechView.new(body)
+	m.view = MechView.new(body, m.weapons)
 	add_child(m.view)
 	m.view.set_skin(m.slot)
 	m.sim.boost_started.connect(func() -> void: sound.play_at("sound/sp_booster", m.sim.pos))
@@ -782,12 +801,13 @@ func _build_body(m: Mech, body: String) -> void:
 		m.sim.wall_crashed.connect(func(at: Vector2, normal: Vector2) -> void: _on_wall_crash(m, at, normal))
 		m.sim.shield_clicked.connect(func() -> void: sound.play("sound/common/shieldused"))
 
-## Another player's body arrived: swap the model and simulation, keeping where they are.
-func _respawn_body(m: Mech, body: String) -> void:
+## Another player's body or loadout arrived: swap the model and simulation, keeping where
+## they are.
+func _respawn_body(m: Mech, body: String, weapons: Array = []) -> void:
 	var at := m.sim.pos
 	var face := m.sim.facing
 	m.view.queue_free()
-	_build_body(m, body)
+	_build_body(m, body, weapons)
 	m.sim.reset_at(at, face)
 
 func _random_other_body(body: String) -> String:
@@ -823,6 +843,10 @@ func _on_local_swing(m: Mech, swing: int) -> void:
 ## to its facing (pt_recv_shoot / ComboSystem::update).
 func _show_swing(m: Mech, swing: int, combo := 0) -> void:
 	m.view.play_attack(swing)
+	# pt_recv_attack_start: a weapon with pulse_time (Void Pulse) starts PulseState.
+	var pulse := m.sim.weapon.mode_num("pulse_time")
+	if pulse > 0.0:
+		m.sim.pulse_time = pulse
 	var cp := Bodies.combo_param(combo)
 	if not cp.is_empty():
 		var start := Bodies.scene_path(str(cp.get("effect_name", "")))
@@ -859,7 +883,7 @@ func _step_swings(dt: float) -> void:
 			continue
 		var facing := Original.vec2_from_deg(attacker.sim.facing)
 		for victim: Mech in _mechs_in_slot_order():
-			if victim == attacker or victim.sim.life <= 0 or Room.teammates(victim.team, attacker.team):
+			if victim == attacker or victim.sim.life <= 0 or victim.sim.is_pulse() or Room.teammates(victim.team, attacker.team):
 				continue
 			var rel := victim.sim.pos - attacker.sim.pos
 			if rel.length() >= w.crash_radius or rel.length_squared() < 0.0001:
@@ -971,6 +995,7 @@ func _physics_process(dt: float) -> void:
 			if _networked():
 				var state := m.sim.snapshot()
 				state.append(m.lock_target)
+				state.append(m.weapons)
 				state.append(Bodies.NAMES.find(m.body))
 				state.append(round_number)
 				_net_state.rpc(state)
@@ -1000,7 +1025,8 @@ func _physics_process(dt: float) -> void:
 			_log_timer = 0.0
 			var parts: Array[String] = []
 			for m: Mech in mechs.values():
-				var flags := (" G" if m.sim.guarding else "") + (" C" if m.sim.is_confused() else "") + (" J" if m.local and hud.jam_time > 0.0 else "")
+				var flags := (" G" if m.sim.guarding else "") + (" C" if m.sim.is_confused() else "") + (" J" if m.local and hud.jam_time > 0.0 else "") \
+					+ (" P" if m.sim.is_pulse() else "") + (" D%d" % m.sim.damage_stacks.size() if not m.sim.damage_stacks.is_empty() else "")
 				parts.append("%s%d s%d t%d %s pos=(%d,%d) hp=%d sh=%d%s" % ["me" if m.local else "peer", m.id, m.slot, m.team, m.body, m.sim.pos.x, m.sim.pos.y, m.sim.life, m.sim.durability, flags])
 			var mines := 0
 			var lying := 0
@@ -1082,6 +1108,8 @@ func _draw_mech(m: Mech, dt: float) -> void:
 	_low_health_sparks(m, dt)
 	if m.view.guarding != m.sim.guarding:
 		m.view.set_guard(m.sim.guarding)
+	# PulseState: drawn see-through (stealth_alpha 150).
+	m.view.set_ghost(m.sim.is_pulse())
 	# rcPlayer::move returns early in BEHAVE_GUARD: the guard pose holds while walking.
 	if m.sim.is_dead or m.sim.guarding or m.view.is_attack_playing() or m.view.is_reacting() or m.view.is_drawing():
 		return
@@ -1178,6 +1206,10 @@ func _on_local_fired(m: Mech, deg: int) -> void:
 		if int(w.mode_num("fire_randomness")) == 1:
 			var half := int(w.mode_num("reverse_range_angle", 60)) / 2
 			aim = (deg + randi_range(-half, half) + 360) % 360
+		# angle_randomness (P.Pulse Gun): each bullet turned by rand() % deg - deg / 2.
+		var spread := int(w.mode_num("angle_randomness"))
+		if spread > 0:
+			aim = (aim + randi() % spread - spread / 2 + 360) % 360
 		var origin := m.view.muzzle_plane_pos(hand)
 		var charge := maxi(0, m.sim.charge_level)
 		_launch(origin, aim, m, w.id, m.burst_target, charge)
@@ -1254,7 +1286,7 @@ func _step_beams(dt: float) -> void:
 			continue
 		var beam_team: int = (mechs[beam.shooter_id] as Mech).team if mechs.has(beam.shooter_id) else Room.NONE
 		for victim: Mech in _mechs_in_slot_order():
-			if victim.id == beam.shooter_id or victim.sim.life <= 0 or Room.teammates(victim.team, beam_team):
+			if victim.id == beam.shooter_id or victim.sim.life <= 0 or victim.sim.is_pulse() or Room.teammates(victim.team, beam_team):
 				continue
 			if not Combat.line_hits(beam.start, beam.line_end(), victim.sim.pos, victim.sim.crash_radius):
 				continue
@@ -1288,8 +1320,11 @@ func _apply_hit(victim: Mech, attacker: int, amount: int, weapon_id: int, from :
 			_guarded(victim, weapon_id, worn, victim.sim.block(worn))
 			return false
 		_guarded(victim, weapon_id, -1, false)
+	# The attacker's confusion (mul_to_damage) and the victim's adddamage_ratio.
+	var mul := victim.sim.damage_taken_mul()
 	if mechs.has(attacker):
-		amount = int(amount * (mechs[attacker] as Mech).sim.damage_mul)
+		mul *= (mechs[attacker] as Mech).sim.damage_mul
+	amount = int(amount * mul)
 	victim.sim.take_damage(amount)
 	_record_hit(victim.id, attacker, amount, victim.sim.life, weapon_id)
 	if _networked() and victim.local:
@@ -1347,6 +1382,17 @@ func _net_state_change(weapon_id: int, count: int) -> void:
 func _show_state(victim: Mech, weapon_id: int, count: int) -> void:
 	var w := GameData.weapon(weapon_id)
 	var time := 0.0
+	if w.state_action_type == 6:
+		# World::state_change case 41: booster_gage -= 200 x (1 + charge_add_damage x charge).
+		victim.sim.booster_gage = maxf(0.0, victim.sim.booster_gage - 200.0 * (1.0 + w.param_num("charge_add_damage") * count))
+		return
+	if w.state_action_type == 9:
+		# case 40: AddDamageState for 10 s, with weapon01/defence_down.x while the stack lasts.
+		if victim.sim.add_damage_stack():
+			var fx := BattleWorld.spawn_effect(victim.view, DEFENCE_DOWN, BattleWorld.effect_basis(1.0), Vector2.ZERO, MechSim.DAMAGE_STACK_TIME)
+			if fx:
+				MechView.play_effect(fx, true)
+		return
 	if w.state_action_type == 5:
 		victim.sim.confuse(w)
 		time = w.mode_num("confusion_time")
@@ -1385,7 +1431,7 @@ func _explode(b: Bullet, at: Vector2, direct: Mech = null) -> void:
 	var jams := b.weapon.mode_num("jamming_time") > 0.0
 	var in_radius := 0
 	for m: Mech in mechs.values():
-		if m.sim.life <= 0:
+		if m.sim.life <= 0 or m.sim.is_pulse():
 			continue
 		var d := m.sim.pos.distance_to(at)
 		if d <= radius:
@@ -1446,7 +1492,7 @@ func _step_bullets(dt: float) -> void:
 		for m: Mech in mechs.values():
 			if not alive:
 				break
-			if m.id == shooter or m.sim.life <= 0 or Room.teammates(m.team, _team_of_id(shooter)):
+			if m.id == shooter or m.sim.life <= 0 or m.sim.is_pulse() or Room.teammates(m.team, _team_of_id(shooter)):
 				continue
 			if not b.hits(m.sim.pos, m.sim.crash_radius):
 				continue
@@ -1460,8 +1506,11 @@ func _step_bullets(dt: float) -> void:
 			if _apply_hit(m, shooter, b.power, b.weapon_id, b.prev_pos):
 				if b.weapon.state_action_type == 3:
 					_stun(m, b.charge, b.dir)
-				elif b.weapon.state_action_type == 5:
+				elif b.weapon.state_action_type in [5, 9]:
 					_state_change(m, b.weapon_id)
+				elif b.weapon.state_action_type == 6:
+					# Viper Smart Gun: the hit's charge level rides in the count.
+					_state_change(m, b.weapon_id, b.charge)
 		# Other screens do not draw a mine lying in wait (no is_stealth model); its owner does.
 		if alive and b.mine:
 			b.visible = not b.is_lying() or (mechs.has(shooter) and _owns(mechs[shooter]))
@@ -1498,7 +1547,7 @@ func _record_hit(victim_id: int, attacker_id: int, amount: int, remaining: int, 
 	# on_damage: the camera shakes for the one hit, by the attacker's weapon slot (WEAPON_3
 	# 0.25 s at power 10, WEAPON_2 0.1 s at power 4).
 	if victim_id == local_id and mechs.has(attacker_id):
-		var slot := Bodies.loadout((mechs[attacker_id] as Mech).body).find(weapon_id)
+		var slot := (mechs[attacker_id] as Mech).weapons.find(weapon_id)
 		if slot == 2:
 			_shake(0.25, 10)
 		elif slot == 1:
@@ -1617,6 +1666,9 @@ func _autopilot_intent(m: Mech) -> MechSim.Intent:
 	var reach := w.crash_radius * 0.9 if w.is_sword() else (w.line_distance * 0.9 if w.is_immediate() else (w.lockon_range() * 0.8 if w.lockon_range() > 0.0 else w.bullet_speed * w.life))
 	if w.is_mine():
 		reach = w.mode_num("detecting_area") * 0.8
+	elif w.is_sword() and w.crash_radius <= 0.0:
+		# Void Pulse hits nothing; use it once an enemy is close.
+		reach = 200.0
 	elif not w.is_sword() and not w.is_immediate() and w.lockon_range() <= 0.0:
 		# Straight shots: stay close enough to keep both mechs in the original camera's view.
 		reach = minf(reach, 260.0)

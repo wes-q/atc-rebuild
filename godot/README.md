@@ -235,17 +235,20 @@ Pick the body in the menu, or add `body=<zeid|redkite|gigas|deff|alicia>` after 
 `dummy=<body>` for the practice target, otherwise a random other body). Each player's body
 travels with their state, so two different bodies can meet.
 
-| Body | Armour | Walk | Slot 1 | Slot 2 | Slot 3 | Slot 4 | Shield |
-|---|---|---|---|---|---|---|---|
-| Zeid | 700 | 108 | Dagger Type 1 | SR-3 | MML Type 1 | EMP Shock Gun | ES Type 1, energy, 350 |
-| Red Kite | 850 | 99 | Dagger Type 1 | Plasma Rifle | Plasma Cannon | Confusing Beam | EBS-0500, energy, 450 |
-| Gigas | 1000 | 89 | Dagger Type 1 | Heavy Machinegun | Cluster Cannon | X-Mine | SS Type 6, solid, 500 |
-| Deff | 900 | 95 | Dagger Type 1 | Arms-Gun | HV Head Beam | Plasma Shock Wave | SS-020, solid, 400 |
-| Alicia | 750 | 102 | Saber Type 1 | Double Hand Gun | Plasma Bow | Plasma Shock Wave | ES Type 2, energy, 300 |
+Default loadouts (the client's `default_item_info`; the server's `InitEquipItemByRobot`):
 
-- **Loadouts:** the database defaults, with the shield taken out and the rest packed into
-  slots 1 to 4 (`Armor::init`). The shield is held apart and raised with Space. Every body
-  starts on slot 2.
+| Body | Armour | Walk | 1 Sword | 2 Gun | 3 Heavy | 4 Special | Shield |
+|---|---|---|---|---|---|---|---|
+| Zeid | 700 | 108 | EB Type 3 | SR-3 | MML Type 1 | EMP Shock Gun | ES Type 1, energy, 350 |
+| Red Kite | 850 | 99 | BB02X-E | Plasma Rifle | Plasma Cannon | Confusing Beam | EBS-0500, energy, 450 |
+| Gigas | 1000 | 89 | SB Type 2 | Heavy Machinegun | Cluster Cannon | X-Mine | SS Type 6, solid, 500 |
+| Deff | 900 | 95 | BB02X-S | Arms-Gun | HV Head Beam | Plasma Shock Wave | SS-020, solid, 400 |
+| Alicia | 750 | 102 | Saber Type 1 | Double Hand Gun | Plasma Bow | Void Pulse | ES Type 2, energy, 300 |
+
+- **Loadouts:** each slot holds one category, chosen in the menu (see Loadouts below). The
+  shield is held apart and raised with Space. Every body starts on slot 2. Until step 12 the
+  defaults came from `RobotInfo`'s default weapons, which gave four bodies the Dagger; the
+  original client never used that table.
 - **Models:** from `anim04` (the newer models with every boost nozzle, the Zeid included).
   Each weapon brings its own attack and move clips for that body and its held model:
   - Deff's Arms-Gun sits in both hands and fires from both.
@@ -258,14 +261,45 @@ travels with their state, so two different bodies can meet.
   model's own after each clip step (`Character::update_frame_pos`). Alicia's clips were made
   on a skeleton 2.3 times larger and only fit because of this.
 - **Attack timing:** comes from the length of each weapon's attack clip for that body.
-- **Alicia's Plasma Shock Wave** has no Alicia clips in the original tables, so she keeps her
-  current pose while using it, as the original's empty animation slot would.
+
+## Loadouts (Step 12, from `page_game_shop.lua`, `Shop_List`, the server's `Shop_Joint_Item`
+and `IsEnableEquip`)
+
+Pick each slot's weapon in the menu under the body, or add `loadout=29,37,4,17` after `--`
+(sword, gun, heavy, special). Money and the shop are not ported: everything the original
+sold is available.
+
+- **Four slots by category:** sword, gun, heavy, special, as Shop_List's subtypes 1 to 4.
+  A weapon fits one category only, and a slot is never empty: unequipping in the original
+  put the default back.
+- **By body:** Shop_List's Robot mask says who may equip what. Every weapon the shop sold
+  for a body is listed (disabled rows like the Whip and Crasher are not).
+- **The shield is fixed:** no shield was ever sold, so each body keeps its own.
+- **Other players see your loadout:** it travels with your state, like your body.
+- **Ported now (33 weapons):** every default weapon, every sword (Spear, Dagger, Claw,
+  Crescent, Rapier, Axe, Twin Blade, H-Blade and the body swords), the H.P Beam Rifle,
+  P.Pulse Gun, Impact Pulse-Gun, Viper Smart Gun and CP Cannon.
+  - **P.Pulse Gun:** a 6-shot burst, each bullet turned at random within 30 degrees
+    (`angle_randomness`).
+  - **Impact Pulse-Gun:** each hit adds 10% to the damage the target takes, up to 2.5x, each
+    stack lasting 10 s (`AddDamageState`, with `defence_down.x` on the target).
+  - **Viper Smart Gun:** a charge weapon; a hit also drains 200 x (1 + 0.2 per charge level)
+    from the target's boost gauge.
+  - **Void Pulse (Alicia's default special):** no damage. Using it makes her intangible for
+    5 s: bullets, beams, swords and splash pass through, and she is drawn see-through
+    (`PulseState`, "a pulse that can ignore external damage").
+- **Listed but not yet (15 weapons):** MP7-C3, Fragment Cannon, PTL Type 1, Napalm Thrower,
+  CP.Pulse Cannon, AP Drain Gun, Power Up Pulse, D Fielder, Teleport Beam, R.Control Beam,
+  Freezing Beam Gun, Leech Bomb, Over Booster, Blind Beam, Plasma Wire. They need mechanics
+  of their own (split and homing child shots, linked hits, damage over time, teleporting,
+  freezing, reversed controls, the chain) and show as "not yet" in the menu.
 
 ## Weapons (from `weapon_parameter.lua`, `weapon_mode_parameter.lua`, `rcAmmo.cpp`, `rcCombo.cpp`)
 
-The Zeid's default loadout from `RobotInfo`: slot 1 Dagger Type 1 (id 28), slot 2 SR-3 (id 3,
-selected at the start), slot 3 MML Type 1 (id 4), slot 4 EMP Shock Gun (id 17), and the
-ES Type 1 shield held apart.
+The Zeid's default loadout: EB Type 3 (id 1), SR-3 (id 3, selected at the start), MML Type 1
+(id 4), EMP Shock Gun (id 17), and the ES Type 1 shield held apart. The Dagger Type 1 (id 28)
+described next is one of the Zeid's sword choices; every sword works the same way with its
+own numbers.
 
 - **Switching:** keys 1 to 4. The new weapon is drawn with its first clip and the owner
   hears the weapon's change sound. Bullets already in flight stay (`clear_active_bullet`
@@ -424,6 +458,9 @@ parts added to the base stats.
 
 ## Known gaps
 
+- The fight HUD's weapon icons stop at id 25, so weapons from the shop's later ranges show
+  no icon in the weapon panel, as in the original.
+- The Napalm Thrower's held model (`anim03/g_napalm.x`) crashes the converter; it is skipped.
 - One `WeaponInfo` column could not be named from the backup's metadata. The server's own query
   identifies it as `continuous_time`, the gap between shots.
 - The fire animation length (0.5 s) comes from the converted clip; the original playback rate
@@ -499,5 +536,5 @@ tools/inspect_import.gd     prints an imported model's tree and clips
 tools/render_poses.gd       renders the mech at several facings
 tools/render_map.gd         renders an arena from above with its walls, bounds and start points
 tools/extract_ui.py         reads the HUD window tables and particle scripts, copies their art
-tests/test_mech_sim.gd      208 checks against the original database values and rules
+tests/test_mech_sim.gd      221 checks against the original database values and rules
 ```

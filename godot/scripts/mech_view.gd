@@ -31,9 +31,10 @@ var particles: Dictionary = {}
 var _current := ""
 var _trail: SwordTrail
 
-func _init(body_name := "zeid") -> void:
+## weapons: the four equipped weapon ids in slot order, or empty for the body's defaults.
+func _init(body_name := "zeid", weapons: Array = []) -> void:
 	body = body_name
-	weapon_ids = Bodies.loadout(body)
+	weapon_ids = Bodies.loadout(body, weapons)
 	model = (load(Bodies.scene_path(Bodies.MODELS[body])) as PackedScene).instantiate()
 	add_child(model)
 	player = AnimationPlayer.new()
@@ -190,6 +191,36 @@ func is_attack_playing() -> bool:
 ## The weapon draw clip after a switch, which movement clips wait for.
 func is_drawing() -> bool:
 	return player.is_playing() and _current == "w%d_0" % weapon_slot
+
+## rcPlayer::draw while is_pulse: the model at stealth_alpha 150 of 255. Each surface gets
+## an alpha-blended copy of its material (the compatibility renderer ignores per-instance
+## transparency); the previous override, a colour scheme or none, comes back after.
+const GHOST_ALPHA := 150.0 / 255.0
+var _ghost := false
+var _ghost_saved: Array = [] ## [mesh, surface, previous override]
+func set_ghost(on: bool) -> void:
+	if on == _ghost:
+		return
+	_ghost = on
+	if not on:
+		for e in _ghost_saved:
+			(e[0] as MeshInstance3D).set_surface_override_material(e[1], e[2])
+		_ghost_saved.clear()
+		return
+	for n in model.find_children("*", "MeshInstance3D", true, false):
+		var mi := n as MeshInstance3D
+		if mi.mesh == null:
+			continue
+		for i in mi.mesh.get_surface_count():
+			var current := mi.get_surface_override_material(i)
+			var base := current if current else mi.mesh.surface_get_material(i)
+			if not base is BaseMaterial3D:
+				continue
+			_ghost_saved.append([mi, i, current])
+			var faded := base.duplicate() as BaseMaterial3D
+			faded.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+			faded.albedo_color.a *= GHOST_ALPHA
+			mi.set_surface_override_material(i, faded)
 
 ## rcPlayer::guard: the take-out clip, held on its last frame while guarding (movement
 ## clips are skipped), the SHLD particles for an energy shield or the shield model for a

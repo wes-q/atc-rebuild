@@ -18,6 +18,10 @@ var map_id := "space"
 ## Body picked in the menu.
 var body_id := "zeid"
 var _body: OptionButton
+## Weapons picked for the body, in slot order (sword, gun, heavy, special).
+var loadout: Array[int] = []
+var _slots: Array[OptionButton] = []
+var _slot_ids: Array = [] ## per slot, the weapon id behind each item
 ## The room's game type for hosting (page_custom_game game_type_select): team battle or not.
 var team_mode := false
 var _mode: OptionButton
@@ -30,8 +34,8 @@ func _ready() -> void:
 
 	var box := VBoxContainer.new()
 	box.set_anchors_and_offsets_preset(Control.PRESET_CENTER)
-	box.custom_minimum_size = Vector2(340, 0)
-	box.position -= Vector2(170, 150)
+	box.custom_minimum_size = Vector2(480, 0)
+	box.position -= Vector2(240, 250)
 	box.add_theme_constant_override("separation", 12)
 	add_child(box)
 
@@ -68,8 +72,26 @@ func _ready() -> void:
 	_body.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	for b in Bodies.NAMES:
 		_body.add_item(Bodies.TITLES[b])
-	_body.item_selected.connect(func(i: int) -> void: body_id = Bodies.NAMES[i])
+	_body.item_selected.connect(func(i: int) -> void:
+		body_id = Bodies.NAMES[i]
+		_fill_loadout([]))
 	body_row.add_child(_body)
+
+	# The garage (page_game_shop's equip slots): one weapon per category, from what the shop
+	# let this body equip. Weapons whose behaviour is not ported yet are listed but disabled.
+	for slot in 4:
+		var row := HBoxContainer.new()
+		box.add_child(row)
+		var label := Label.new()
+		label.text = Bodies.SLOT_NAMES[slot]
+		label.custom_minimum_size = Vector2(60, 0)
+		row.add_child(label)
+		var pick := OptionButton.new()
+		pick.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		pick.item_selected.connect(func(i: int) -> void: loadout[slot] = int(_slot_ids[slot][i]))
+		row.add_child(pick)
+		_slots.append(pick)
+		_slot_ids.append([])
 	select_body(body_id)
 
 	var mode_row := HBoxContainer.new()
@@ -110,10 +132,30 @@ func _button(parent: Control, text: String, action: Callable) -> void:
 	b.pressed.connect(action)
 	parent.add_child(b)
 
-func select_body(id: String) -> void:
+func select_body(id: String, weapons: Array = []) -> void:
 	body_id = id
 	if _body and id in Bodies.NAMES:
 		_body.select(Bodies.NAMES.find(id))
+	_fill_loadout(weapons)
+
+## Fills the four slot pickers for the current body, selecting the given weapons (or the
+## defaults). Each item shows the database's damage, reload and ammo.
+func _fill_loadout(weapons: Array) -> void:
+	loadout = Bodies.loadout(body_id, weapons)
+	for slot in _slots.size():
+		var pick := _slots[slot]
+		pick.clear()
+		_slot_ids[slot] = []
+		for wid in Bodies.choices(body_id, slot):
+			var w := GameData.weapon(wid)
+			var ammo := "no limit" if w.ammo < 0 else "%d ammo" % w.ammo
+			var text := "%s   %d dmg, %.1f s, %s" % [w.name, w.damage, w.reload, ammo]
+			if not Bodies.PORTED.has(wid):
+				text = "%s   (not yet)" % w.name
+			pick.add_item(text)
+			pick.set_item_disabled(pick.item_count - 1, not Bodies.PORTED.has(wid))
+			_slot_ids[slot].append(wid)
+		pick.select(_slot_ids[slot].find(loadout[slot]))
 
 func select_mode(teams: bool) -> void:
 	team_mode = teams

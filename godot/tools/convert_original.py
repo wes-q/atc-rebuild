@@ -462,8 +462,9 @@ GUARD_FILES = {
     "deff": ("anim/deff_guard_take_out.x", "anim/deff_guard_defense.x"),
     "alicia": ("anim01/ali_guard_take_out.x", "anim01/ali_guard_defense.x"),
 }
-# World::receive_guard: a blocked hit, and the shield breaking.
-GUARD_EFFECTS = ("weapon/character_block.X", "weapon/shield_crash.X")
+# World::receive_guard: a blocked hit, and the shield breaking. World::state_change: the
+# Impact Pulse-Gun's AddDamageState mark.
+GUARD_EFFECTS = ("weapon/character_block.X", "weapon/shield_crash.X", "weapon01/defence_down.X")
 # weapon_parameter.lua field prefixes, by body.
 WEAPON_FIELD_PREFIX = {"zeid": "zeid", "redkite": "redkite", "gigas": "gigas", "deff": "deff", "alicia": "alicia"}
 WEAPON_EFFECT_FIELDS = ("bullet_xfile", "bullet_xfile2", "bullet_xfile3", "bullet_start_xfile", "bullet_dead_xfile",
@@ -492,12 +493,12 @@ def convert_bodies(data_dir: pathlib.Path, out_dir: pathlib.Path) -> None:
     wanted: set[str] = set()
     textures: set[str] = set()
     sounds: set[str] = set()
+    # Every weapon in the tables, for every body, so any loadout can be drawn (Step 12).
+    weapon_ids = sorted(int(w["id"]) for w in weapons.values())
     for body, (model, dmg1, dmg2) in BODIES.items():
         wanted.update([model, dmg1, dmg2])
-        robot = robots[body]
-        for k in ("default_weapon1_id", "default_weapon2_id", "default_weapon3_id", "default_weapon4_id", "default_weapon5_id"):
-            wid = robot.get(k)
-            entry = wp.get(f"Weapon_{wid}") if wid else None
+        for wid in weapon_ids:
+            entry = wp.get(f"Weapon_{wid}")
             if not entry:
                 continue
             prefix = WEAPON_FIELD_PREFIX[body]
@@ -526,6 +527,7 @@ def convert_bodies(data_dir: pathlib.Path, out_dir: pathlib.Path) -> None:
             if isinstance(combo.get(field), str) and combo[field]:
                 wanted.add(combo[field])
     converted = 0
+    failed: list[str] = []
     for rel in sorted(wanted):
         norm = rel.replace("\\", "/").lstrip("./")
         try:
@@ -533,7 +535,13 @@ def convert_bodies(data_dir: pathlib.Path, out_dir: pathlib.Path) -> None:
         except FileNotFoundError:
             print(f"  missing model {norm}")
             continue
-        convert(data_dir, out_dir, norm, x_name(rel))
+        try:
+            convert(data_dir, out_dir, norm, x_name(rel))
+        except subprocess.CalledProcessError as e:
+            # assimp crashes on a few of the archive's files; the game skips what is missing.
+            print(f"  failed to convert {norm}: {e.returncode}")
+            failed.append(norm)
+            continue
         converted += 1
     for rel in sorted(textures):
         norm = rel.replace("\\", "/").lstrip("./")
@@ -555,7 +563,7 @@ def convert_bodies(data_dir: pathlib.Path, out_dir: pathlib.Path) -> None:
         dst = out_dir / name.lower()
         dst.parent.mkdir(parents=True, exist_ok=True)
         copy_ogg(src, dst)
-    print(f"bodies: {converted} models, {len(textures)} textures, {len(sounds)} sounds")
+    print(f"bodies: {converted} models, {len(textures)} textures, {len(sounds)} sounds, {len(failed)} failed")
 
 
 def copy_ogg(src: pathlib.Path, dst: pathlib.Path) -> None:

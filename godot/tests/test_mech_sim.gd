@@ -59,6 +59,8 @@ func _init() -> void:
 	test_room_start_points()
 	test_room_end_and_winners()
 	test_touch_controls()
+	test_equip_rules()
+	test_pulse_and_damage_stacks()
 	print("\n%d passed, %d failed" % [passed, failures])
 	quit(1 if failures > 0 else 0)
 
@@ -431,13 +433,13 @@ func test_weapon_switching() -> void:
 	print("weapon keys")
 	var sim := MechSim.new()
 	check(sim.weapon_index == 1 and sim.weapon.name == "SR-3", "starts on slot 2, the SR-3")
-	check(sim.slots[0].data.name == "Dagger Type 1" and sim.slots[2].data.name == "MML Type 1", "slots 1 and 3 hold the dagger and the MML")
+	check(sim.slots[0].data.name == "EB Type 3" and sim.slots[2].data.name == "MML Type 1", "slots 1 and 3 hold the EB Type 3 and the MML")
 	var changed := [-1]
 	sim.weapon_changed.connect(func(slot: int) -> void: changed[0] = slot)
 	var it := MechSim.Intent.new()
 	it.weapon_key = 1
 	sim.step(it, DT)
-	check(sim.weapon_index == 0 and changed[0] == 0, "key 1 takes the dagger")
+	check(sim.weapon_index == 0 and changed[0] == 0, "key 1 takes the sword")
 	it.weapon_key = 0
 	sim.step(it, DT)
 	it.weapon_key = 4
@@ -458,7 +460,7 @@ func test_weapon_switching() -> void:
 
 func test_sword_combo() -> void:
 	print("dagger combo (ComboSystem)")
-	var sim := MechSim.new()
+	var sim := MechSim.new("zeid", Original.START_WEAPON, [28, 3, 4, 17])
 	var swings: Array[int] = []
 	sim.swung.connect(func(_slot: int, swing: int) -> void: swings.append(swing))
 	var it := MechSim.Intent.new()
@@ -520,10 +522,10 @@ func test_missile_ammo_and_burst() -> void:
 # --- Bodies (step 7) ------------------------------------------------------------------------
 
 func test_body_loadouts() -> void:
-	print("loadouts (Armor::init packs the slots, shields out)")
+	print("default loadouts (NetManager default_item_info, sword, gun, heavy, special)")
 	var want := {
-		"zeid": [28, 3, 4, 17], "redkite": [28, 6, 7, 18], "gigas": [28, 10, 11, 19],
-		"deff": [28, 13, 12, 20], "alicia": [21, 23, 24, 20],
+		"zeid": [1, 3, 4, 17], "redkite": [5, 6, 7, 18], "gigas": [8, 10, 11, 19],
+		"deff": [14, 13, 12, 20], "alicia": [21, 23, 24, 25],
 	}
 	for b in want:
 		var got := Bodies.loadout(b)
@@ -812,7 +814,7 @@ func test_mine_cycle() -> void:
 
 func test_combo_table() -> void:
 	print("command combos (combo_parameter.lua)")
-	var want := {"zeid": [2, 3], "redkite": [2, 3], "gigas": [2, 3], "deff": [2, 3], "alicia": [10, 11]}
+	var want := {"zeid": [2, 3], "redkite": [4, 5], "gigas": [6, 7], "deff": [8, 9], "alicia": [10, 11]}
 	var ok := true
 	for body: String in want:
 		var sim := MechSim.new(body)
@@ -820,7 +822,7 @@ func test_combo_table() -> void:
 		for c in sim.combo_commands:
 			ids.append(c.id)
 		ok = ok and ids == Array(want[body], TYPE_INT, "", null)
-	check(ok, "each body's sword registers its two combos (Alicia's saber 10 and 11, the dagger 2 and 3)")
+	check(ok, "each body's own sword registers its two combos (2-3, 4-5, 6-7, 8-9, 10-11)")
 	var c2 := Bodies.combo_param(2)
 	var c3 := Bodies.combo_param(3)
 	check(c2.damage == 14 and c2.finish == 0 and c3.damage == 30 and c3.finish == 1, "dagger: right, click +14; left, right, click +30, a finisher")
@@ -1026,3 +1028,33 @@ func test_touch_controls() -> void:
 	check(tc.guard and tc.weapon_key == 0, "GUARD holds the guard key")
 	_touch(tc, 3, guard_at, false)
 	tc.free()
+
+func test_equip_rules() -> void:
+	print("equip rules (Shop_List, IsEnableEquip, Shop_Joint_Item)")
+	check(Bodies.choices("zeid", 0) == [1, 28, 29] and Bodies.choices("zeid", 1) == [3, 37], "Zeid: swords EB Type 3, Dagger, Claw; guns SR-3, H.P Beam Rifle")
+	check(Bodies.choices("zeid", 3) == [17, 46, 48, 49] and Bodies.choices("alicia", 3) == [25, 46, 47], "specials by body, AP Drain shared by Zeid and Alicia")
+	check(not Bodies.choices("alicia", 0).has(27) and not Bodies.choices("deff", 0).has(34), "disabled shop rows (Whip, Crasher) are not offered")
+	check(Bodies.checked_loadout("zeid", [21, 37, 4, 17]) == [1, 37, 4, 17], "another body's sword falls back to the default")
+	check(Bodies.checked_loadout("zeid", [28, 3, 42, 17]) == [28, 3, 4, 17], "a weapon not ported yet (PTL) falls back too")
+	check(Bodies.shield_id("gigas") == 9 and Bodies.shield_id("alicia") == 22, "the shield is the body's own, never chosen")
+	var sim := MechSim.new("redkite", Original.START_WEAPON, [30, 38, 43, 18])
+	check(sim.slots[0].data.name == "Crescent Type 1" and sim.slots[2].data.name == "CP Cannon" and sim.shield.id == 16, "a chosen loadout reaches the slots; the shield stays")
+
+func test_pulse_and_damage_stacks() -> void:
+	print("Void Pulse and Impact Pulse-Gun (PulseState, AddDamageState)")
+	var w := GameData.weapon(25)
+	check(w.damage == 0 and w.crash_radius == 0.0 and w.mode_num("pulse_time") == 5.0, "Void Pulse does no damage; it is a 5 s pulse")
+	var sim := MechSim.new("alicia")
+	sim.pulse_time = 5.0
+	var it := MechSim.Intent.new()
+	run(sim, it, 4.9)
+	check(sim.is_pulse(), "still intangible at 4.9 s")
+	run(sim, it, 0.2)
+	check(not sim.is_pulse(), "and solid again after 5 s")
+	for i in 20:
+		sim.add_damage_stack()
+	check(near(sim.damage_taken_mul(), 2.5) and sim.damage_stacks.size() == 15, "stacks add 0.1 each up to 2.5x (15 stacks)")
+	run(sim, it, 9.9)
+	check(sim.damage_stacks.size() == 15, "each lasts 10 s")
+	run(sim, it, 0.2)
+	check(sim.damage_stacks.is_empty() and near(sim.damage_taken_mul(), 1.0), "then wears off")

@@ -209,11 +209,21 @@ var turn_mul := 1.0 ## rotation_speed x this (TurnState)
 var damage_mul := 1.0 ## this mech's outgoing damage x this (mul_to_damage)
 var fire_delay := 0.0 ## added before each queued bullet (add_to_fire_time)
 
-## body_name: RobotInfo name. weapon_slot: the slot selected at the start.
-func _init(body_name := "zeid", weapon_slot := Original.START_WEAPON) -> void:
+## PulseState (Void Pulse, pulse_time): bullets, swords and splash pass through for this long.
+var pulse_time := 0.0
+## AddDamageState (Impact Pulse-Gun): each stack adds 0.1 to the damage this mech takes
+## (adddamage_ratio, at most 2.5) and lasts its own 10 s.
+const DAMAGE_STACK_TIME := 10.0
+const DAMAGE_STACK_CAP := 2.5
+var damage_stacks: Array[float] = []
+
+## body_name: RobotInfo name. weapon_slot: the slot selected at the start. weapons: the four
+## equipped weapon ids in slot order (sword, gun, heavy, special), or empty for the body's
+## defaults.
+func _init(body_name := "zeid", weapon_slot := Original.START_WEAPON, weapons: Array = []) -> void:
 	body = body_name
 	stats = GameData.robot(body)
-	for id in Bodies.loadout(body):
+	for id in Bodies.loadout(body, weapons):
 		slots.append(Slot.new(GameData.weapon(id), body))
 	_register_combo_commands()
 	weapon_index = weapon_slot
@@ -537,7 +547,26 @@ func confuse(w: GameData.Weapon) -> void:
 func is_confused() -> bool:
 	return confusion_time > 0.0
 
+## adddamage_ratio: damage taken is multiplied by this.
+func damage_taken_mul() -> float:
+	return 1.0 + 0.1 * damage_stacks.size()
+
+## AddDamageState::init: a new stack only below the cap. True if it was added.
+func add_damage_stack() -> bool:
+	if damage_taken_mul() >= DAMAGE_STACK_CAP - 0.001:
+		return false
+	damage_stacks.append(DAMAGE_STACK_TIME)
+	return true
+
+func is_pulse() -> bool:
+	return pulse_time > 0.0
+
 func _update_states(dt: float) -> void:
+	pulse_time = maxf(0.0, pulse_time - dt)
+	for i in range(damage_stacks.size() - 1, -1, -1):
+		damage_stacks[i] -= dt
+		if damage_stacks[i] <= 0.0:
+			damage_stacks.remove_at(i)
 	if confusion_time > 0.0:
 		confusion_time -= dt
 		if confusion_time <= 0.0:
@@ -904,6 +933,8 @@ func reset_at(spawn: Vector2, face: int) -> void:
 	guarding = false
 	_prev_guard = false
 	_clear_confusion()
+	pulse_time = 0.0
+	damage_stacks.clear()
 	_prev_fire = false
 	_prev_weapon_key = 0
 	_booster_input = BoosterInput.NOTHING

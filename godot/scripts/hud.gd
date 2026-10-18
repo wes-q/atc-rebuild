@@ -196,11 +196,11 @@ func refresh(sim: MechSim, me_name: String, status: String, round_time: float, c
 	if booster == null:
 		overlay.queue_redraw()
 		return
-	if _weapons_set != sim.body + str(sim.slots.size()):
-		_weapons_set = sim.body + str(sim.slots.size())
-		var ids: Array = []
-		for sl in sim.slots:
-			ids.append(sl.data.id)
+	var ids: Array = []
+	for sl in sim.slots:
+		ids.append(sl.data.id)
+	if _weapons_set != str(ids):
+		_weapons_set = str(ids)
 		_initial_weapons(ids)
 	_update_board(dt)
 	time_update(round_time)
@@ -336,8 +336,13 @@ func self_user_state(robot: int, user_name: String, hp: int, level: int) -> void
 ## 28) show no icon, as they did.
 func _initial_weapons(ids: Array) -> void:
 	for i in mini(4, ids.size()):
-		weapon.w("item_slot_%d_img" % (i + 1)).texture_switch(ids[i])
-		weapon.w("item_slot_%d_img_selete" % (i + 1)).texture_switch(ids[i])
+		_icon(weapon.w("item_slot_%d_img" % (i + 1)), ids[i])
+		_icon(weapon.w("item_slot_%d_img_selete" % (i + 1)), ids[i])
+
+## The fight HUD's icon lists stop at id 25; later weapons had no icon, so draw nothing
+## rather than leave the last one showing.
+static func _icon(win: OriginalUI, id: int) -> void:
+	win.texture_switch(id if id < win.textures.size() else OriginalUI.MAX_SCREEN_TEXTURES - 1)
 
 ## OnWeaponUpdate(weapon_id, recharging_time, weapon_name) for the selected slot (0 to 3):
 ## the recharge ring steps through 16 images as the reload fills, the slot glows near the end,
@@ -358,7 +363,7 @@ func weapon_update(weapon_id: int, ratio: float, weapon_name: String, slot_index
 			elif i == 14:
 				slot.texture_switch(15)
 			break
-	weapon.w("weapon_img").texture_switch(weapon_id)
+	_icon(weapon.w("weapon_img"), weapon_id)
 	weapon.w("weapon_name").text_set(weapon_name)
 	weapon.w("item_selecte_mark").pos_set(SLOT_MARK_X[slot_index], 31)
 	for i in range(1, 7):

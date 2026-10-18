@@ -41,6 +41,7 @@ What the archive contains: `docs/archive-inventory.md`.
 | 9 | Sword command combos | Done |
 | 10 | Up to 12 players, free-for-all or red and blue teams | Done |
 | 11 | Android: touch controls and an APK build | Done |
+| 12 | Loadouts: four weapon slots by category, the original defaults, 33 weapons | Done |
 
 ## History
 
