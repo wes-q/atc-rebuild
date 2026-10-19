@@ -396,11 +396,13 @@ The APK carries the converted CodiNET art and sound: it is for your own phones a
 private play, never a store, and it is git-ignored like the art.
 
 **Touch controls** (`scripts/touch_controls.gd`):
-- **Left stick:** move along the screen axes in eight directions, like WASD. Pushed to the
-  rim it also boosts. The stick appears wherever your thumb lands on the left half.
+- **Left stick:** move along the screen axes in eight directions, like WASD. The stick
+  appears wherever your thumb lands on the left half.
 - **Right stick:** aim; the mech turns toward the drag. Pushed past a third of the way it
   fires: held for the Heavy Machinegun, Plasma Shock Wave, Plasma Bow (let go to shoot) and
   Cluster Cannon (let go to burst), about eight clicks a second for everything else.
+- **BOOST:** hold it to boost (the right mouse button), the largest button, beside GUARD
+  under the right thumb, so the left thumb keeps steering.
 - **Buttons:** 1 to 4 for the weapon slots, GUARD, LOCK, PLAYERS (the Tab panel) and MENU.
   Between rounds the host gets START and, in team battle, everyone gets TEAM.
 - **Command combos:** flick the left stick toward your facing, then fire; or away, toward,

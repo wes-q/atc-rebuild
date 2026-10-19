@@ -2,13 +2,14 @@ class_name TouchControls
 extends CanvasLayer
 ## On-screen controls for phones (this recreation's own; the original was keyboard and
 ## mouse). Two floating sticks and a few buttons stand in for the keys:
-## - Left stick: move along the screen axes in eight directions, like WASD. Pushed to the
-##   rim it also holds the boost (the right mouse button).
+## - Left stick: move along the screen axes in eight directions, like WASD.
 ## - Right stick: aim, turning the mech toward the drag. Pushed past a third of the way it
 ##   fires, holding the trigger for weapons that use a held button (streams, the bow's draw,
 ##   the Cluster Cannon) and clicking about eight times a second for the rest.
-## - Buttons: weapon slots 1 to 4, GUARD (Space), LOCK (F), PLAYERS (Tab), MENU (Esc), and
-##   between rounds START for the host and TEAM in team battle.
+## - Buttons: BOOST (the right mouse button, held), weapon slots 1 to 4, GUARD (Space),
+##   LOCK (F), PLAYERS (Tab), MENU (Esc), and between rounds START for the host and TEAM in
+##   team battle. BOOST is the largest, beside GUARD under the right thumb, so the left thumb
+##   keeps steering while it is held.
 ## A command combo is a flick of the left stick toward or away from your facing, then fire.
 ## Sizes are in canvas units (the 768-high base), so they hold on every screen.
 
@@ -19,8 +20,8 @@ signal team_pressed
 const STICK_RADIUS := 80.0
 const KNOB_RADIUS := 34.0
 const BUTTON_RADIUS := 34.0
+const BOOST_RADIUS := 46.0
 const DEAD_ZONE := 0.25
-const BOOST_AT := 0.9
 const FIRE_AT := 0.35
 const AXIS_AT := 0.38 ## a stick axis counts once past this share of the direction
 const CLICK_PERIOD := 0.12
@@ -31,6 +32,7 @@ var aim := Vector2.ZERO ## screen space unit vector, zero before the first aim
 var firing := false
 var weapon_key := 0
 var guard := false
+var boost := false
 var lock := false
 var players := false
 # Set by the game: whether START and TEAM are offered right now.
@@ -57,14 +59,14 @@ func _process(dt: float) -> void:
 	_click_time += dt
 	_pad.queue_redraw()
 
-## The left stick as the four movement keys and the boost button.
+## The left stick as the four movement keys, and the BOOST button.
 func keys() -> Dictionary:
 	var length := move.length()
 	var d := move.normalized() if length > DEAD_ZONE else Vector2.ZERO
 	return {
 		"left": d.x < -AXIS_AT, "right": d.x > AXIS_AT,
 		"up": d.y < -AXIS_AT, "down": d.y > AXIS_AT,
-		"boost": length >= BOOST_AT,
+		"boost": boost,
 	}
 
 ## The fire button this frame: held for weapons that use holding, clicked for the rest.
@@ -101,7 +103,7 @@ func _input(event: InputEvent) -> void:
 
 func _touch_down(index: int, at: Vector2) -> void:
 	for b in _buttons():
-		if at.distance_to(b[1]) <= BUTTON_RADIUS * 1.15:
+		if at.distance_to(b[1]) <= _radius(b[0]) * 1.15:
 			_fingers[index] = b[0]
 			_button_down(b[0])
 			_handled()
@@ -156,6 +158,8 @@ func _button_down(name: String) -> void:
 			weapon_key = int(name)
 		"GUARD":
 			guard = true
+		"BOOST":
+			boost = true
 		"LOCK":
 			lock = true
 		"PLAYERS":
@@ -173,6 +177,8 @@ func _button_up(name: String) -> void:
 			weapon_key = 0
 		"GUARD":
 			guard = false
+		"BOOST":
+			boost = false
 		"LOCK":
 			lock = false
 		"PLAYERS":
@@ -189,6 +195,7 @@ func _buttons() -> Array:
 		out.append([str(i + 1), Vector2(w - 290 + 72 * i, h - 330)])
 	out.append(["LOCK", Vector2(w - 360, h - 250)])
 	out.append(["GUARD", Vector2(w - 360, h - 160)])
+	out.append(["BOOST", Vector2(w - 290, h - 66)])
 	out.append(["PLAYERS", Vector2(56, 250)])
 	out.append(["MENU", Vector2(w - 56, 56)])
 	if show_start:
@@ -196,6 +203,9 @@ func _buttons() -> Array:
 	if show_team:
 		out.append(["TEAM", Vector2(w * 0.5 + 60, 120)])
 	return out
+
+func _radius(name: String) -> float:
+	return BOOST_RADIUS if name == "BOOST" else BUTTON_RADIUS
 
 func _draw_pad() -> void:
 	var font := ThemeDB.fallback_font
@@ -220,8 +230,10 @@ func _draw_pad() -> void:
 		var held: bool = _fingers.values().has(b[0])
 		var name: String = b[0]
 		var active := held or (name == str(weapon_key))
-		_pad.draw_circle(b[1], BUTTON_RADIUS, Color(0.3, 0.6, 1, 0.45) if active else Color(0, 0, 0, 0.35))
-		_pad.draw_arc(b[1], BUTTON_RADIUS, 0, TAU, 40, line, 2.0)
+		var r := _radius(name)
+		var lit := Color(1, 0.75, 0.3, 0.55) if name == "BOOST" else Color(0.3, 0.6, 1, 0.45)
+		_pad.draw_circle(b[1], r, lit if active else Color(0, 0, 0, 0.35))
+		_pad.draw_arc(b[1], r, 0, TAU, 40, line, 2.0)
 		var size := 22 if name.length() == 1 else 12
 		var text_w := font.get_string_size(name, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x
 		_pad.draw_string(font, b[1] + Vector2(-text_w * 0.5, size * 0.35), name, HORIZONTAL_ALIGNMENT_LEFT, -1, size, Color(1, 1, 1, 0.85))

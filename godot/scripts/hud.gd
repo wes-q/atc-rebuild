@@ -67,7 +67,7 @@ var touch_help := false:
 			# The buttons carry their own labels; the line would sit over the right stick.
 			_help.visible = not v
 const KEY_HELP := "WASD: move   Mouse: aim   Left: fire   Right: boost   Space: guard   Tab: players   +/-: camera   M: sound   Esc: menu"
-const TOUCH_HELP := "Left stick: move, rim boosts   Right stick: aim, push to fire   Combo: flick toward your facing, then fire"
+const TOUCH_HELP := "Left stick: move   Right stick: aim, push to fire   BOOST: hold   Combo: flick toward your facing, then fire"
 var _status: Label
 var _help: Label
 var _result: Control

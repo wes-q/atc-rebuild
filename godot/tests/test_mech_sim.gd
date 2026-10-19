@@ -1009,7 +1009,12 @@ func test_touch_controls() -> void:
 	check(k.right and not k.left and not k.up and not k.boost, "left stick half right: walk right")
 	_drag(tc, 0, Vector2(240, 480))
 	k = tc.keys()
-	check(k.right and k.up and k.boost, "pushed to the rim up and right: diagonal with boost")
+	check(k.right and k.up and not k.boost, "pushed to the rim up and right: diagonal, no boost (BOOST is its own button)")
+	# BOOST, held by the other thumb while the left one steers.
+	_touch(tc, 2, Vector2(1600 - 290, 720 - 66), true)
+	check(tc.keys().boost and tc.keys().right, "holding BOOST boosts while the stick steers")
+	_touch(tc, 2, Vector2(1600 - 290, 720 - 66), false)
+	check(not tc.keys().boost, "letting go of BOOST stops it")
 	_drag(tc, 0, Vector2(160, 560))
 	check(not tc.keys().right and not tc.keys().boost, "inside the dead zone: nothing")
 	_touch(tc, 0, Vector2(160, 560), false)
