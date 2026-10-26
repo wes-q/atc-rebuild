@@ -1,0 +1,66 @@
+ATC RAYCRASH (fan recreation, for private play)
+================================================
+
+This is a private, non-commercial recreation of ATC Raycrash (CodiNET, 2005), made for
+playing among friends. It contains the original game's art and sound. Please don't share
+it further or post it anywhere.
+
+STARTING THE GAME
+-----------------
+1. Unzip the whole folder somewhere (for example your Desktop). Don't run it from inside
+   the zip.
+2. Double-click "ATC Raycrash.exe".
+3. Windows will probably say "Windows protected your PC", because the game isn't signed.
+   Click "More info", then "Run anyway". This only happens the first time.
+4. If the game prints errors or won't start, run "ATC Raycrash.console.exe" instead: it
+   opens the same game with a text window showing what went wrong. Send a screenshot of it.
+
+You need Windows 10 or 11 (64-bit) and graphics that support OpenGL 3.3, which is almost
+any laptop from the last ten years. A mouse is strongly recommended.
+
+FIRST STEPS
+-----------
+- Login: type any name as your ID (the password is ignored), then ACCESS.
+- Character select: the arrows pick your mech, ENTER goes on.
+- Main menu:
+    MATCH      play with others (room list and game rooms)
+    TUTORIAL   practice against a target dummy
+    ITEM SHOP  choose your weapons (nothing costs anything)
+    OPTION     volume, full screen, tooltips
+
+CONTROLS
+--------
+    W A S D          move
+    Mouse            aim
+    Left click       attack (hold for some weapons)
+    Right click      boost (hold)
+    1 2 3 4          weapon slots
+    Space            raise or lower your guard
+    F                next lock-on target (missiles)
+    Tab              everyone's health
+    + / -            camera zoom
+    M                sound on or off
+    Esc              leave the battle
+
+Sword combos: tap a movement key toward the way you are facing, then click.
+
+PLAYING TOGETHER
+----------------
+On the same Wi-Fi or home network:
+  One player goes to MATCH, CREATE, and makes a room. The others go to MATCH and the room
+  appears in the list: click it twice to go in. The room's creator presses START.
+
+From different places (over the internet), use Tailscale (free, tailscale.com):
+  1. Both players install Tailscale and sign in. The host invites the other player to their
+     tailnet, or shares their computer with them from Tailscale's admin page.
+  2. The host creates a room. The room's chat shows the host's addresses; the Tailscale one
+     starts with 100.
+  3. The other player types that address into the room list's room-name box at the top,
+     then clicks GO.
+  4. To check the connection, run "tailscale ping 100.x.y.z" (the host's address). "via" an
+     address means a direct connection; "via DERP" means it goes through Tailscale's relay
+     servers, which is slower.
+  The player with the fastest upload speed should host, on a computer rather than a phone.
+
+The first time you host, Windows may ask whether to allow the game through the firewall.
+Allow it on private networks, or nobody can join you.

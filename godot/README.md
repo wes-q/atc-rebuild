@@ -376,6 +376,24 @@ states a second.
 | M | Sound and music on or off (this recreation's own) |
 | Esc | Leave the match |
 
+## Windows build for friends (this recreation's own)
+
+A Windows laptop runs the game from a zip, with no Godot. Build it on the Mac once Godot's
+4.7.2 export templates for Windows are installed (from the official
+`Godot_v4.7.2-stable_export_templates.tpz`, checked against the release's SHA512-SUMS.txt;
+only the four `windows_*_x86_64` files are needed):
+
+```
+godot --headless --path godot --export-release "Windows Desktop" "$PWD/godot/export/windows/ATC Raycrash.exe"
+```
+
+Then zip `ATC Raycrash.exe`, `ATC Raycrash.console.exe` and `godot/share/READ ME FIRST.txt`
+in one folder. The zip is about 100 MB; it carries CodiNET's art, so it goes to friends
+directly, never anywhere public. It is git-ignored like the APK. The read-me covers starting
+it (the unsigned build gets Windows' "protected your PC" warning once), the controls and
+playing together. Textures are stored losslessly, so the same import serves Windows and
+Android.
+
 ## Android (this recreation's own)
 
 The game runs on Android phones and tablets in landscape, with on-screen controls. A
