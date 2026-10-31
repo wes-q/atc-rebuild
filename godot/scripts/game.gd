@@ -170,6 +170,7 @@ var _test_hp := _arg_int("hp=")
 var _dummy_near := _arg_int("dummy_near=")
 ## Autopilot: keep to this weapon slot (1 to 4) instead of cycling.
 var _autopilot_slot := _arg_int("slot=")
+var _autododge := OS.get_cmdline_user_args().has("autododge")
 ## Test option "capture=<dir>": saves 30 frames per second of real-time play as JPEGs.
 var _capture_dir := _arg_str("capture=")
 var _capture_time := 0.0
@@ -1391,6 +1392,7 @@ func _build_body(m: Mech, body: String, weapons: Array = []) -> void:
 	m.sim.guard_changed.connect(func(on: bool) -> void: _on_guard_changed(m, on))
 	if m.local or m.id == DUMMY_ID:
 		_connect_grab(m)
+		_connect_jump_shove(m)
 		m.sim.fired.connect(func(_o: Vector2, deg: int) -> void: _on_local_fired(m, deg))
 		m.sim.attack_started.connect(func(_w: int) -> void: m.burst_target = m.lock_target)
 		m.sim.swung.connect(func(_w: int, swing: int) -> void: _on_local_swing(m, swing))
@@ -1483,9 +1485,11 @@ func _step_swings(dt: float) -> void:
 			if victim == attacker or victim.sim.life <= 0 or victim.sim.is_pulse() or Room.teammates(victim.team, attacker.team):
 				continue
 			var rel := victim.sim.pos - attacker.sim.pos
-			if rel.length() >= w.crash_radius or rel.length_squared() < 0.0001:
+			# A jumping mech is measured at its height, the swing on the ground.
+			var reach := victim.sim.lifted(rel.length())
+			if reach >= w.crash_radius or reach < 0.01:
 				continue
-			if rad_to_deg(acos(clampf(rel.normalized().dot(facing), -1.0, 1.0))) >= w.collision_degree * 0.5:
+			if rad_to_deg(acos(clampf(rel.dot(facing) / reach, -1.0, 1.0))) >= w.collision_degree * 0.5:
 				continue
 			swings.remove_at(i)
 			BattleWorld.sword_hit(self, victim.sim.pos)
@@ -1706,7 +1710,7 @@ func _process(dt: float) -> void:
 			_capture_index += 1
 
 func _draw_mech(m: Mech, dt: float) -> void:
-	m.view.place(m.sim.pos, m.sim.facing)
+	m.view.place(m.sim.pos, m.sim.facing, m.sim.height())
 	# Boost nozzles: "00" while boosting (start/stop_booster_particle); the directional ones
 	# burst on each new move, and against the old one on a stop (update_booster).
 	if m.sim.speed_state != m.prev_speed_state or not m.sim.move_dir.is_equal_approx(m.prev_move_dir):
@@ -1780,6 +1784,9 @@ func _read_intent(m: Mech) -> MechSim.Intent:
 	it.guard = Input.is_physical_key_pressed(KEY_SPACE)
 	# DIK_C (option.ini KeySetting CLUTCH): the grab.
 	it.grab = Input.is_physical_key_pressed(KEY_C)
+	# DIK_X (KeySetting AVOID): the jump. DIK_LSHIFT: the shove (either Shift here).
+	it.jump = Input.is_physical_key_pressed(KEY_X)
+	it.shove = Input.is_physical_key_pressed(KEY_SHIFT)
 	# DIK_1 to DIK_4, or the keypad.
 	for k in 4:
 		if Input.is_physical_key_pressed(KEY_1 + k) or Input.is_physical_key_pressed(KEY_KP_1 + k):
@@ -1802,6 +1809,8 @@ func _touch_intent(m: Mech) -> MechSim.Intent:
 	it.fire = touch.fire_held(hold)
 	it.guard = touch.guard
 	it.grab = touch.grab
+	it.jump = touch.jump
+	it.shove = touch.shove
 	it.weapon_key = touch.weapon_key
 	var d := touch.plane_aim()
 	if d == Vector2.ZERO:
@@ -1935,7 +1944,7 @@ func _step_beams(dt: float) -> void:
 		for victim: Mech in _mechs_in_slot_order():
 			if victim.id == beam.shooter_id or victim.sim.life <= 0 or victim.sim.is_pulse() or Room.teammates(victim.team, beam_team):
 				continue
-			if not Combat.line_hits(beam.start, beam.line_end(), victim.sim.pos, victim.sim.crash_radius):
+			if not Combat.line_hits(beam.start, beam.line_end(), victim.sim.pos, victim.sim.crash_radius, victim.sim.height()):
 				continue
 			if beam.pierce():
 				if not beam.register_contact(victim.id, dt):
@@ -2512,7 +2521,9 @@ func _grab_check(m: Mech) -> void:
 				or o.sim.is_nodamage() or Room.teammates(o.team, m.team):
 			continue
 		var d := o.sim.pos - m.sim.pos
-		if d.length_squared() >= MechSim.GRAB_REACH * MechSim.GRAB_REACH:
+		# Measured in 3D, so a mech in the air is out of reach.
+		var dh := o.sim.height() - m.sim.height()
+		if d.length_squared() + dh * dh >= MechSim.GRAB_REACH * MechSim.GRAB_REACH:
 			continue
 		if d.length_squared() > 0.0001 and ahead.dot(d.normalized()) <= MechSim.GRAB_CONE_COS:
 			continue
@@ -2560,6 +2571,8 @@ func _grab_answer(grabber: int, victim: int, ok: bool) -> void:
 	if _owns(v):
 		v.sim.grab_held(grabber, a.sim.pos, a.sim.facing)
 		_held_by[victim] = grabber
+		if v.id == DUMMY_ID:
+			_npc_shove(v)
 
 @rpc("any_peer", "call_remote", "reliable")
 func _net_grab_combo(id: int) -> void:
@@ -2724,7 +2737,7 @@ func _explode(b: Bullet, at: Vector2, direct: Mech = null) -> void:
 	for m: Mech in mechs.values():
 		if m.sim.life <= 0 or m.sim.is_pulse():
 			continue
-		var d := m.sim.pos.distance_to(at)
+		var d := m.sim.lifted(m.sim.pos.distance_to(at))
 		if d <= radius:
 			in_radius += 1
 		var amount := 0
@@ -2816,10 +2829,10 @@ func _step_bullets(dt: float) -> void:
 			var mate := not own and Room.teammates(m.team, shooter_team)
 			if mate and not b.linked:
 				# A teammate's shot through a mech carrying a leech bomb defuses it.
-				if _owns(m) and _leeches.has(m.id) and b.hits(m.sim.pos, m.sim.crash_radius):
+				if _owns(m) and _leeches.has(m.id) and b.hits(m.sim.pos, m.sim.crash_radius, m.sim.height()):
 					_leech_release(m, false)
 				continue
-			if not b.hits(m.sim.pos, m.sim.crash_radius):
+			if not b.hits(m.sim.pos, m.sim.crash_radius, m.sim.height()):
 				continue
 			alive = false
 			if b.weapon.is_splash():
@@ -2909,6 +2922,65 @@ func _record_hit(victim_id: int, attacker_id: int, amount: int, remaining: int, 
 	elif attacker_id == local_id:
 		BattleWorld.font_marker(self, me.sim.pos + Vector2(0, 100), true)
 		hud.show_target(Bodies.face(victim.body), float(maxi(0, remaining)) / float(victim.sim.life_max), _mech_name(victim))
+
+# --- Step 19: the jump and the shove -------------------------------------------------------
+# Each is an event the owner's machine sends to the others (RGSERVER_MOVE_REQ 77, RG_SHOVE_REQ
+# and RG_SHOVE_ACK). Every machine shows the hop and the shove; each pushes only the mechs it
+# runs, from where it sees the shover.
+
+const SHOVE_BURST := "res://assets/original/x/weapon/character_twing.gltf"
+const SHOVE_BURST_LIFE := 1.5
+
+func _connect_jump_shove(m: Mech) -> void:
+	m.sim.jumped.connect(func() -> void:
+		if _netlog:
+			print("  jump by %d" % m.id)
+		if _networked():
+			_net_jump.rpc())
+	m.sim.shoved.connect(func() -> void:
+		_shove(m)
+		if _networked():
+			_net_shove.rpc())
+
+## pt_recv_ymove: the sender's hop, run here on its own clock.
+@rpc("any_peer", "call_remote", "reliable")
+func _net_jump() -> void:
+	var m: Mech = mechs.get(multiplayer.get_remote_sender_id())
+	if m:
+		m.sim.start_jump()
+		if _netlog:
+			print("  jump by %d seen" % m.id)
+
+@rpc("any_peer", "call_remote", "reliable")
+func _net_shove() -> void:
+	var m: Mech = mechs.get(multiplayer.get_remote_sender_id())
+	if m:
+		_shove(m)
+
+## World::receive_shove: the shover's clip, its burst 0.2 s in, and every mech this machine
+## runs within reach dashed away from it. No team test: teammates are pushed too.
+func _shove(s: Mech) -> void:
+	s.view.play_shove()
+	get_tree().create_timer(MechSim.SHOVE_BURST_DELAY).timeout.connect(func() -> void:
+		if is_instance_valid(s.view) and mechs.has(s.id):
+			_shove_burst(s))
+	for p: Mech in mechs.values():
+		if p == s or not _owns(p) or p.sim.is_dead_complete:
+			continue
+		var push := MechSim.shove_push(s.body, s.sim.pos, s.sim.height(), p.sim.pos, p.sim.height())
+		if push != Vector2.ZERO:
+			p.sim.start_dash(p.sim.pos + push)
+	if _netlog:
+		print("  shove by %d" % s.id)
+
+func _shove_burst(s: Mech) -> void:
+	BattleWorld.spawn_effect(self, SHOVE_BURST, BattleWorld.effect_basis(1.0), s.sim.pos, SHOVE_BURST_LIFE)
+
+## rcNPC::pt_send_npc_shove, sent when a computer player is caught (pt_recv_clutch_catch): no
+## recharge test, and World::receive_npc_shove adds a burst at once as well as the usual one.
+func _npc_shove(s: Mech) -> void:
+	_shove_burst(s)
+	_shove(s)
 
 # --- Camera -----------------------------------------------------------------------------
 
@@ -3110,4 +3182,8 @@ func _autopilot_intent(m: Mech) -> MechSim.Intent:
 		it.guard = want_guard != m.sim.guarding and fmod(_clock, 0.5) < 0.1
 		if m.sim.guarding:
 			it.fire = false
+	# Test option "autododge": hop as soon as it is ready, shove whoever comes within reach.
+	if _autododge:
+		it.jump = fmod(_clock, 0.4) < 0.2
+		it.shove = dist < MechSim.SHOVE_RANGE * 0.9 and fmod(_clock, 0.4) < 0.2
 	return it

@@ -48,6 +48,7 @@ What the archive contains: `docs/archive-inventory.md`.
 | 16 | Internet play: send rate by player count, a host override, the Tailscale guide | Done |
 | 17 | The last 15 weapons: split and linked shots, burns, drains, the leech bomb, teleport, freeze, blind, the plasma wire | Done |
 | 18 | The grab (clutch) and each body's special attack | Done |
+| 19 | The jump (X) and the shove (Shift) | Done |
 
 ## Step 16 plan: internet play (agreed with Wes)
 

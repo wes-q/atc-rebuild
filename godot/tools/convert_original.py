@@ -607,6 +607,10 @@ STATE_EFFECTS = ("weapon01/fire_burn.X", "weapon01/drain_target_effect.X", "weap
                  "weapon01/busterup.X")
 # The grab combos' effects (rcPlayer.cpp clutch_combo_action and the special's end).
 GRAB_EFFECTS = ("weapon/japki_drian.x", "weapon/bitFlash_eff.X", "weapon/japki_attack.x", "weapon/sword_hit.X")
+# The shove (rcPlayer::shove): each body's PLAYERANIM_ETC file (clip 0 the shove, clip 1 the
+# guard crash) and the burst it leaves 0.2 s in (character_twing.X).
+SHOVE_FILES = ("anim/zeid_etc.x", "anim/redkite_etc.x", "anim/gigas_etc.x", "anim/deff_etc.x",
+               "anim01/ali_etc.x", "weapon/character_twing.X")
 # weapon_parameter.lua field prefixes, by body.
 WEAPON_FIELD_PREFIX = {"zeid": "zeid", "redkite": "redkite", "gigas": "gigas", "deff": "deff", "alicia": "alicia"}
 WEAPON_EFFECT_FIELDS = ("bullet_xfile", "bullet_xfile2", "bullet_xfile3", "bullet_start_xfile", "bullet_dead_xfile",
@@ -666,6 +670,7 @@ def convert_bodies(data_dir: pathlib.Path, out_dir: pathlib.Path) -> None:
     wanted.update(STATE_EFFECTS)
     wanted.update(GRAB_ANIMS)
     wanted.update(GRAB_EFFECTS)
+    wanted.update(SHOVE_FILES)
     # The sword command combos' flashes (combo_parameter.lua).
     for combo in params.get("combo_parameter", []):
         for field in ("effect_name", "rotate_effect_name"):

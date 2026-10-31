@@ -16,6 +16,8 @@ class Intent:
 	var weapon_key := 0 ## number key held this frame, 1 to 4, or 0
 	var guard := false ## Space, held state; the guard toggles on the press
 	var grab := false ## C, held state; the grab starts on the press
+	var jump := false ## X (option.ini AVOID), held state; the jump starts on the press
+	var shove := false ## Left Shift, held state; the shove goes on the press
 	var aim := Vector2.ZERO ## point under the mouse, on the plane
 
 	func move_dir() -> Vector2:
@@ -296,6 +298,7 @@ func take_damage(amount: int) -> bool:
 	return life <= 0
 
 func step(intent: Intent, dt: float) -> void:
+	_advance_jump(dt)
 	if _update_dead(dt):
 		return
 	previous_pos = pos
@@ -312,6 +315,8 @@ func step(intent: Intent, dt: float) -> void:
 		swapped.weapon_key = intent.weapon_key
 		swapped.guard = intent.guard
 		swapped.grab = intent.grab
+		swapped.jump = intent.jump
+		swapped.shove = intent.shove
 		swapped.aim = intent.aim
 		intent = swapped
 	# StunState and FreezeState: every input is dropped, turning and firing included.
@@ -321,6 +326,8 @@ func step(intent: Intent, dt: float) -> void:
 		held.aim = pos + Original.vec2_from_deg(facing) * 100.0
 		intent = held
 	_update_states(dt)
+	# update_my_input: the shove and the jump are read before the grab's update.
+	_update_jump_shove(intent)
 	intent = _update_grab(intent, dt)
 	_update_booster_gauge(intent, dt)
 	_update_move(intent)
@@ -1290,6 +1297,84 @@ static func grab_push(id: int, grabber_facing: int) -> Vector2:
 			return Vector2(0, -dist)
 	return Original.vec2_from_deg(grabber_facing) * dist
 
+# --- Jump and shove (rcPlayer.cpp set_ymove and shove, rcManager.cpp update_my_input and
+# updateshove, world.cpp receive_shove) --------------------------------------------------------
+# X hops the mech straight up and down (ymove): pos.y = sin(pi t) x 200 for a second, and every
+# hit test measures from the mech's centre at that height to attacks on the ground, so most of
+# the hop is out of reach. Left Shift shoves: everyone within reach of the shover is dashed
+# straight away from it; the game applies that on each machine to the mechs it runs.
+
+const JUMP_TIME := 1.0 ## y_time > 1 ends the hop
+const JUMP_HEIGHT := 200.0 ## sinf(PI * y_time) * 200, not scaled by HAHA_SCALE_VAL
+const JUMP_RECHARGE := 5.0 ## ymove_recharge_time: ready at 4.999, full from the start
+## player_parameter.lua, the same for every body: range_to_apply_shoving 300 and the recharge.
+const SHOVE_RANGE := 300.0 * Original.SCALE
+const SHOVE_RECHARGE := 20.0 ## shove_recharging_time, full from the start (rcPlayer::init)
+const SHOVE_BURST_DELAY := 0.2 ## shove_start_time: character_twing.X goes off this long in
+## shoved_distance by the shover's body, x HAHA_SCALE_VAL (player_param_set).
+const SHOVE_DISTANCE := {"zeid": 400.0 * Original.SCALE, "redkite": 450.0 * Original.SCALE,
+	"gigas": 500.0 * Original.SCALE, "deff": 450.0 * Original.SCALE, "alicia": 450.0 * Original.SCALE}
+
+## X went down with the hop recharged and no grab holding the mech (RGSERVER_MOVE_REQ 77).
+signal jumped
+## Left Shift went down with the shove recharged (RG_SHOVE_REQ).
+signal shoved
+
+## Seconds into the hop, or -1 when on the ground.
+var jump_time := -1.0
+var jump_recharge := JUMP_RECHARGE
+var shove_recharge := SHOVE_RECHARGE
+var _prev_jump := false
+var _prev_shove := false
+
+## The mech's height off the plane.
+func height() -> float:
+	return sin(PI * jump_time) * JUMP_HEIGHT if jump_time >= 0.0 else 0.0
+
+## A plane distance to the mech's centre measured from the ground, as the original's 3D hit
+## tests do (the attack's y is 0, the mech's is its height).
+func lifted(plane_dist: float) -> float:
+	var h := height()
+	return sqrt(plane_dist * plane_dist + h * h) if h > 0.0 else plane_dist
+
+## set_ymove: a hop already under way is not restarted.
+func start_jump() -> void:
+	if jump_time < 0.0:
+		jump_time = 0.0
+
+## rcPlayer::update: the hop and both recharges, on every machine and while down too.
+func _advance_jump(dt: float) -> void:
+	jump_recharge = minf(JUMP_RECHARGE, jump_recharge + dt)
+	shove_recharge = minf(SHOVE_RECHARGE, shove_recharge + dt)
+	if jump_time >= 0.0:
+		jump_time += dt
+		if jump_time > JUMP_TIME:
+			jump_time = -1.0
+
+## updateshove has no grab test, so a held mech can shove; the hop is barred while grabbing
+## or held (the CATCH and CATCHED test, and is_my_player_controlable).
+func _update_jump_shove(intent: Intent) -> void:
+	var jump_down := intent.jump and not _prev_jump
+	var shove_down := intent.shove and not _prev_shove
+	_prev_jump = intent.jump
+	_prev_shove = intent.shove
+	if shove_down and shove_recharge >= SHOVE_RECHARGE:
+		shove_recharge = 0.0
+		shoved.emit()
+	if jump_down and not _grab_blocks() and jump_recharge >= JUMP_RECHARGE - 0.001:
+		jump_recharge = 0.0
+		start_jump()
+		jumped.emit()
+
+## The push a shove gives a mech: away from the shover by its body's distance, if the two
+## centres (heights included) are within reach; zero otherwise or when they coincide.
+static func shove_push(shover_body: String, shover_pos: Vector2, shover_height: float, at: Vector2, at_height: float) -> Vector2:
+	var d := at - shover_pos
+	var dh := at_height - shover_height
+	if sqrt(d.length_squared() + dh * dh) > SHOVE_RANGE or d.length_squared() < 0.0001:
+		return Vector2.ZERO
+	return d.normalized() * float(SHOVE_DISTANCE.get(shover_body, SHOVE_DISTANCE["zeid"]))
+
 # --- Network -----------------------------------------------------------------------------
 # Each player moves their own mech and broadcasts its state, like the original client did
 # with its move protocol. Remote copies only display that state.
@@ -1344,6 +1429,7 @@ func apply_snapshot(s: Array) -> void:
 ## rcPlayer::update for remote players: carry the reported position forward at the reported
 ## velocity, then ease the drawn position 10% of the way toward it each tick.
 func step_remote(dt: float) -> void:
+	_advance_jump(dt)
 	_update_states(dt)
 	real_pos += move_dir * _last_vel * dt
 	pos += (real_pos - pos) * 0.1
@@ -1404,6 +1490,11 @@ func reset_at(spawn: Vector2, face: int) -> void:
 	grab_clip = ""
 	_grab_keys.clear()
 	_grab_kicks = -1
+	jump_time = -1.0
+	jump_recharge = JUMP_RECHARGE
+	shove_recharge = SHOVE_RECHARGE
+	_prev_jump = false
+	_prev_shove = false
 	_prev_fire = false
 	_prev_weapon_key = 0
 	_booster_input = BoosterInput.NOTHING

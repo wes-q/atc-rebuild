@@ -151,6 +151,12 @@ const GUARD := {
 	"alicia": ["anim01/ali_guard_take_out.x", "anim01/ali_guard_defense.x"],
 }
 
+## PLAYERANIM_ETC by body (each class's init): clip 0 the shove, clip 1 the guard crash.
+const ETC := {
+	"zeid": "anim/zeid_etc.x", "redkite": "anim/redkite_etc.x", "gigas": "anim/gigas_etc.x",
+	"deff": "anim/deff_etc.x", "alicia": "anim01/ali_etc.x",
+}
+
 ## What a body shows for one weapon: its attack and move files (weapon_parameter.lua
 ## <body>_animation_xfile), the held model and the frames it sits in.
 static func weapon_view(body: String, id: int) -> Dictionary:
