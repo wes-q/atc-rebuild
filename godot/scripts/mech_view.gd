@@ -56,6 +56,12 @@ func _init(body_name := "zeid", weapons: Array = []) -> void:
 		var guard_path := Bodies.scene_path(Bodies.GUARD[body][i])
 		if guard_path != "":
 			_import_clips(lib, guard_path, "guard%d_" % i)
+	# The grab's clips (Bodies.grab_clips), one per file: "g_<slot>_0".
+	var grabs := Bodies.grab_clips(body)
+	for slot in grabs:
+		var grab_path := Bodies.scene_path(str(grabs[slot]))
+		if grab_path != "":
+			_import_clips(lib, grab_path, "g_%s_" % slot)
 	player.add_animation_library("", lib)
 	player.playback_default_blend_time = 0.15
 
@@ -170,6 +176,15 @@ func set_weapon(slot: int, animate := true) -> void:
 		player.get_animation(_current).loop_mode = Animation.LOOP_NONE
 	else:
 		play_stand()
+
+## The grab's clip (MechSim.grab_clip): started again whenever its count moves on, so a hit
+## played twice in a row shows twice. The hold and the held pose loop.
+var _grab_serial := -1
+func play_grab(slot: String, serial: int) -> void:
+	if serial == _grab_serial:
+		return
+	_grab_serial = serial
+	_play("g_%s_0" % slot, slot in ["hold", "held"], true)
 
 func play_stand() -> void:
 	_play("w%d_%d" % [weapon_slot, Original.ANIM_STAND], true)

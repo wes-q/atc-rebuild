@@ -610,7 +610,11 @@ func _clear_bullets() -> void:
 		b.queue_free()
 	bullets.clear()
 	swings.clear()
-	# The step 17 states end with the round.
+	# The step 17 states and the grab's locks end with the round.
+	_grab_locks.clear()
+	_held_by.clear()
+	_grab_asked.clear()
+	_sa_time = -1.0
 	_ticks.clear()
 	for id in _leeches.keys():
 		_drop_leech(id)
@@ -1029,6 +1033,8 @@ func _net_refused(reason: String) -> void:
 	_back_to_rooms(reason)
 
 func _on_peer_disconnected(id: int) -> void:
+	if mode == "host":
+		_grab_forget(id)
 	_remove_mech(id)
 	_sitting_out.erase(id)
 	if mode == "host" and roster.has(id):
@@ -1384,6 +1390,7 @@ func _build_body(m: Mech, body: String, weapons: Array = []) -> void:
 	m.sim.charge_changed.connect(func(level: int) -> void: m.view.set_charge(level))
 	m.sim.guard_changed.connect(func(on: bool) -> void: _on_guard_changed(m, on))
 	if m.local or m.id == DUMMY_ID:
+		_connect_grab(m)
 		m.sim.fired.connect(func(_o: Vector2, deg: int) -> void: _on_local_fired(m, deg))
 		m.sim.attack_started.connect(func(_w: int) -> void: m.burst_target = m.lock_target)
 		m.sim.swung.connect(func(_w: int, swing: int) -> void: _on_local_swing(m, swing))
@@ -1600,6 +1607,7 @@ func _physics_process(dt: float) -> void:
 			m.sim.step(it, dt)
 		else:
 			m.sim.step_remote(dt)
+	_step_grabs()
 	_step_bullets(dt)
 	_step_beams(dt)
 	_step_swings(dt)
@@ -1627,6 +1635,7 @@ func _physics_process(dt: float) -> void:
 					+ (" FRZ" if m.sim.freeze_time > 0.0 else "") + (" REV" if m.sim.reverse_time > 0.0 else "") + (" BLD" if m.sim.blind_time > 0.0 else "") \
 					+ (" FLD" if m.sim.field_time > 0.0 else "") + (" PWR" if m.sim.power_time > 0.0 else "") + (" WIRE" if m.sim.gravity_time > 0.0 else "") \
 					+ (" OVB" if m.sim.over_boost_time > 0.0 else "") + (" LEECH" if _leeches.has(m.id) else "") \
+					+ (" GRAB:%s" % MechSim.Grab.keys()[m.sim.grab] if m.sim.grab != MechSim.Grab.NONE else "") \
 					+ (" TICK%d" % _ticks.filter(func(t: Array) -> bool: return t[0] == m.id).size() if _ticks.any(func(t: Array) -> bool: return t[0] == m.id) else "")
 				parts.append("%s%d s%d t%d %s%s pos=(%d,%d) hp=%d sh=%d%s" % ["me" if m.local else "peer", m.id, m.slot, m.team, m.body, str(m.weapons).replace(" ", ""), m.sim.pos.x, m.sim.pos.y, m.sim.life, m.sim.durability, flags])
 			var mines := 0
@@ -1651,6 +1660,8 @@ func _process(dt: float) -> void:
 	hud.visible = not _in_room
 	if me and not _in_room:
 		_update_camera(_watched(), dt)
+		if _watched() == me:
+			_update_sa_camera(me, dt)
 	for m: Mech in mechs.values():
 		if not _in_room:
 			_draw_mech(m, dt)
@@ -1730,6 +1741,10 @@ func _draw_mech(m: Mech, dt: float) -> void:
 		else:
 			alpha = minf(alpha, float(_fading[m.id]))
 	m.view.set_alpha(alpha)
+	# The grab's clips (clutch states) take over from the rest while a grab is on.
+	if m.sim.grab_clip != "":
+		m.view.play_grab(m.sim.grab_clip, m.sim.grab_clip_serial)
+		return
 	# rcPlayer::move returns early in BEHAVE_GUARD: the guard pose holds while walking.
 	if m.sim.is_dead or m.sim.guarding or m.view.is_attack_playing() or m.view.is_reacting() or m.view.is_drawing():
 		return
@@ -1763,6 +1778,8 @@ func _read_intent(m: Mech) -> MechSim.Intent:
 	it.boost = Input.is_action_pressed("boost")
 	it.fire = Input.is_action_pressed("fire")
 	it.guard = Input.is_physical_key_pressed(KEY_SPACE)
+	# DIK_C (option.ini KeySetting CLUTCH): the grab.
+	it.grab = Input.is_physical_key_pressed(KEY_C)
 	# DIK_1 to DIK_4, or the keypad.
 	for k in 4:
 		if Input.is_physical_key_pressed(KEY_1 + k) or Input.is_physical_key_pressed(KEY_KP_1 + k):
@@ -1784,6 +1801,7 @@ func _touch_intent(m: Mech) -> MechSim.Intent:
 	var hold := w.is_continuous or w.is_charge() or int(w.mode_num("button_up_explosion")) == 1
 	it.fire = touch.fire_held(hold)
 	it.guard = touch.guard
+	it.grab = touch.grab
 	it.weapon_key = touch.weapon_key
 	var d := touch.plane_aim()
 	if d == Vector2.ZERO:
@@ -2417,6 +2435,268 @@ func _link(b: Bullet, at: Vector2, hit: Mech) -> void:
 	link.set_meta("shooter", shooter_id)
 	bullets.append(link)
 
+# --- Step 18: the grab (clutch) and the special attacks -----------------------------------
+# The grabber's machine finds who its dash meets (update_clutch_check) and asks the host,
+# which keeps one lock per held mech, as the server's is_clutch did, and tells everyone. The
+# grabber's machine then runs the combo and sends its hits; the held one's machine moves and
+# frees its own mech. Remote screens draw both from their state updates.
+
+## The grab's hits in hit reports: they come from no weapon (send_damage index 100).
+const GRAB_HIT := -100
+const GRAB_SWORD_HIT := "res://assets/original/x/weapon/sword_hit.gltf"
+const GRAB_EFFECTS := {
+	6: "res://assets/original/x/weapon/bitflash_eff.gltf",
+	7: "res://assets/original/x/weapon/japki_drian.gltf",
+}
+const GRAB_FINISH_ZEID := "res://assets/original/x/weapon/japki_attack.gltf"
+const GRAB_FINISH_AHEAD := 60.0
+## dxcamera.cpp sa_ani: three moves, each from the gameplay view toward the mech plus an offset
+## at a height, at a speed, held, then back when its time is up. [offset, height, speed, time]
+const SA_CAMERA := [[Vector2(50, 0), 40.0, 1000.0, 0.8], [Vector2(-70, 0), 21.0, 600.0, 0.8], [Vector2(0, -50), 50.0, 600.0, 1.6]]
+
+## Host (or practice): held mech id -> grabber id.
+var _grab_locks: Dictionary = {}
+## This machine's grabbers: id -> the ids already asked about this dash (once each).
+var _grab_asked: Dictionary = {}
+## This machine's held mechs: id -> the grabber's id.
+var _held_by: Dictionary = {}
+## The special's camera, running for the grabber: seconds in, or -1.
+var _sa_time := -1.0
+
+## The grab's sim signals, for a mech this machine runs.
+func _connect_grab(m: Mech) -> void:
+	m.sim.grab_dashed.connect(func() -> void:
+		if m.local:
+			sound.play("sound/clutch_start"))
+	m.sim.grab_combo_started.connect(func(id: int) -> void:
+		_show_grab_combo(m, id)
+		if _networked():
+			_net_grab_combo.rpc(id))
+	m.sim.grab_kick.connect(func(final: bool) -> void:
+		_show_grab_kick(m, m.sim.grab_combo, final)
+		if _networked():
+			_net_grab_kick.rpc(m.sim.grab_combo, final))
+	m.sim.grab_combo_done.connect(func(id: int) -> void:
+		_grab_throw(m, id, m.sim.facing)
+		if _networked():
+			_net_grab_throw.rpc(id, m.sim.facing))
+	m.sim.grab_window_out.connect(func() -> void:
+		_grab_let_go(m)
+		if _networked():
+			_net_grab_let_go.rpc())
+	m.sim.grab_release.connect(func() -> void: _grab_release_ask(m))
+
+## Every physics tick, for the mechs this machine runs: the dash's catch test, and a held
+## mech whose grabber is gone or down, or which is down itself, lets go.
+func _step_grabs() -> void:
+	for m: Mech in mechs.values():
+		if not _owns(m):
+			continue
+		if m.sim.grab == MechSim.Grab.DASH:
+			_grab_check(m)
+		else:
+			_grab_asked.erase(m.id)
+		if _held_by.has(m.id):
+			var a: Mech = mechs.get(_held_by[m.id])
+			if m.sim.life <= 0 or a == null or a.sim.life <= 0:
+				m.sim.grab_free()
+				_grab_release_ask(m)
+
+## update_clutch_check: anyone within 24 units and the cone ahead, not a teammate, not down,
+## not intangible or frozen. Each is asked about once a dash; there is no nearest pick.
+func _grab_check(m: Mech) -> void:
+	var asked: Array = _grab_asked.get(m.id, [])
+	var ahead := Original.vec2_from_deg(m.sim.facing)
+	for o: Mech in mechs.values():
+		if o == m or asked.has(o.id) or o.sim.is_dead_complete or o.sim.life <= 0 or o.sim.is_pulse() \
+				or o.sim.is_nodamage() or Room.teammates(o.team, m.team):
+			continue
+		var d := o.sim.pos - m.sim.pos
+		if d.length_squared() >= MechSim.GRAB_REACH * MechSim.GRAB_REACH:
+			continue
+		if d.length_squared() > 0.0001 and ahead.dot(d.normalized()) <= MechSim.GRAB_CONE_COS:
+			continue
+		asked.append(o.id)
+		_grab_asked[m.id] = asked
+		if _networked() and mode != "host":
+			_net_grab_ask.rpc_id(1, o.id)
+		else:
+			_grab_decide(m.id, o.id)
+
+@rpc("any_peer", "call_remote", "reliable")
+func _net_grab_ask(victim: int) -> void:
+	if mode == "host":
+		_grab_decide(multiplayer.get_remote_sender_id(), victim)
+
+## The host's call (RG_CLUTCH_REQ): yes unless the target is already held or gone.
+func _grab_decide(grabber: int, victim: int) -> void:
+	var ok := not _grab_locks.has(victim) and mechs.has(victim) and not (mechs[victim] as Mech).sim.is_dead_complete
+	if ok:
+		_grab_locks[victim] = grabber
+	_grab_answer(grabber, victim, ok)
+	if _networked():
+		_net_grab_answer.rpc(grabber, victim, ok)
+
+@rpc("authority", "call_remote", "reliable")
+func _net_grab_answer(grabber: int, victim: int, ok: bool) -> void:
+	_grab_answer(grabber, victim, ok)
+
+## RG_CLUTCH_ACK on every machine: the catch sound at the one held; each side's own machine
+## starts its part.
+func _grab_answer(grabber: int, victim: int, ok: bool) -> void:
+	if not mechs.has(grabber) or not mechs.has(victim):
+		return
+	var a: Mech = mechs[grabber]
+	var v: Mech = mechs[victim]
+	if not ok:
+		if _owns(a):
+			a.sim.grab_refused()
+		return
+	a.sim.grab_target = victim
+	v.sim.grab_target = grabber
+	sound.play_at("sound/clutch_success", v.sim.pos)
+	if _owns(a):
+		a.sim.grab_caught(victim)
+	if _owns(v):
+		v.sim.grab_held(grabber, a.sim.pos, a.sim.facing)
+		_held_by[victim] = grabber
+
+@rpc("any_peer", "call_remote", "reliable")
+func _net_grab_combo(id: int) -> void:
+	var a: Mech = mechs.get(multiplayer.get_remote_sender_id())
+	if a:
+		_show_grab_combo(a, id)
+
+## A combo begins: its sound and effect at the one held (clutch_throw for the throws, the
+## spark's and the drain's own). A special: sa.ogg at the grabber, the screen flash for the
+## two of them, and the grabber's camera move.
+func _show_grab_combo(a: Mech, id: int) -> void:
+	var v: Mech = mechs.get(a.sim.grab_target)
+	var at := v.sim.pos if v else a.sim.pos
+	match id:
+		1, 2, 3, 4:
+			sound.play_at("sound/clutch_throw", at)
+		6:
+			sound.play_at("sound/clutch_spark", at)
+		7:
+			sound.play_at("sound/drain", at)
+	if GRAB_EFFECTS.has(id) and ResourceLoader.exists(GRAB_EFFECTS[id]):
+		BattleWorld.spawn_effect(self, GRAB_EFFECTS[id], BattleWorld.effect_basis(1.0), at, Bodies.grab_clip_time(a.body, "spark") + 0.1)
+	if id == 5 or id > 8:
+		sound.play_at("sound/common/sa", a.sim.pos)
+		if a.id == local_id or (v and v.id == local_id):
+			hud.sp_flash()
+		if a.id == local_id:
+			_sa_time = 0.0
+
+@rpc("any_peer", "call_remote", "reliable")
+func _net_grab_kick(id: int, final: bool) -> void:
+	var a: Mech = mechs.get(multiplayer.get_remote_sender_id())
+	if a:
+		_show_grab_kick(a, id, final)
+
+## A special's hit: sword_hit.x and blade_Hit at the one held, the damage on its machine; the
+## last hit sounds finish.ogg, and Zeid's leaves japki_attack.x 60 units ahead.
+func _show_grab_kick(a: Mech, id: int, final: bool) -> void:
+	var v: Mech = mechs.get(a.sim.grab_target)
+	if v == null:
+		return
+	BattleWorld.spawn_effect(self, GRAB_SWORD_HIT, BattleWorld.facing_effect_basis(randi() % 360), v.sim.pos, 0.5)
+	sound.play_at("sound/finish" if final else "sound/blade_Hit", v.sim.pos)
+	if final and id == 5 and ResourceLoader.exists(GRAB_FINISH_ZEID):
+		BattleWorld.spawn_effect(self, GRAB_FINISH_ZEID, BattleWorld.effect_basis(1.0), a.sim.pos + Original.vec2_from_deg(a.sim.facing) * GRAB_FINISH_AHEAD, 1.0)
+	if _owns(v):
+		_special_hit(v, a.id, int(Bodies.grab_combo(id).get("damage", 0)), GRAB_HIT)
+
+@rpc("any_peer", "call_remote", "reliable")
+func _net_grab_throw(id: int, grabber_facing: int) -> void:
+	var a: Mech = mechs.get(multiplayer.get_remote_sender_id())
+	if a:
+		_grab_throw(a, id, grabber_facing)
+
+## The combo's end on the held one's machine: the damage (a special's came with its hits),
+## the push and the stun.
+func _grab_throw(a: Mech, id: int, grabber_facing: int) -> void:
+	var v: Mech = mechs.get(a.sim.grab_target)
+	if v == null or not _owns(v):
+		return
+	var c := Bodies.grab_combo(id)
+	if not (id == 5 or id > 8):
+		_special_hit(v, a.id, int(c.get("damage", 0)), GRAB_HIT)
+	if v.sim.life > 0:
+		v.sim.grab_thrown(MechSim.grab_push(id, grabber_facing), float(c.get("rigidity_time", 0.0)))
+
+@rpc("any_peer", "call_remote", "reliable")
+func _net_grab_let_go() -> void:
+	var a: Mech = mechs.get(multiplayer.get_remote_sender_id())
+	if a:
+		_grab_let_go(a)
+
+## No combo in time (RG_CLUTCH_COMBORESULT 0): the held one's machine frees it.
+func _grab_let_go(a: Mech) -> void:
+	var v: Mech = mechs.get(a.sim.grab_target)
+	if v and _owns(v) and v.sim.is_grabbed():
+		v.sim.grab_free()
+		_grab_release_ask(v)
+
+## RG_CLUTCH_RELEASE_REQ from the held one's machine; the host lifts the lock and tells all.
+func _grab_release_ask(v: Mech) -> void:
+	_held_by.erase(v.id)
+	if _networked() and mode != "host":
+		_net_grab_release_ask.rpc_id(1)
+	else:
+		_grab_release(v.id)
+
+@rpc("any_peer", "call_remote", "reliable")
+func _net_grab_release_ask() -> void:
+	if mode == "host":
+		_grab_release(multiplayer.get_remote_sender_id())
+
+func _grab_release(victim: int) -> void:
+	_grab_locks.erase(victim)
+	_grab_released(victim)
+	if _networked():
+		_net_grab_released.rpc(victim)
+
+@rpc("authority", "call_remote", "reliable")
+func _net_grab_released(victim: int) -> void:
+	_grab_released(victim)
+
+## RG_CLUTCH_RELEASE_ACK: the held one is free on its own machine.
+func _grab_released(victim: int) -> void:
+	var v: Mech = mechs.get(victim)
+	if v and _owns(v):
+		v.sim.grab_free()
+
+## The host lifts every lock a mech had, held or holding (it left, or the round is over).
+func _grab_forget(id: int) -> void:
+	_grab_locks.erase(id)
+	for held in _grab_locks.keys():
+		if _grab_locks[held] == id:
+			_grab_locks.erase(held)
+			_grab_released(held)
+			if _networked():
+				_net_grab_released.rpc(held)
+	_held_by.erase(id)
+	_grab_asked.erase(id)
+
+## sa_ani, after the gameplay camera has been placed this frame.
+func _update_sa_camera(me: Mech, dt: float) -> void:
+	if _sa_time < 0.0 or me == null:
+		return
+	_sa_time += dt
+	var start := 0.0
+	for key: Array in SA_CAMERA:
+		var span: float = key[3]
+		if _sa_time < start + span:
+			var t := _sa_time - start
+			var target := Original.to_godot(me.sim.pos + (key[0] as Vector2)) + Vector3(0, key[1], 0)
+			camera.position = camera.position.move_toward(target, float(key[2]) * t)
+			camera.look_at(Original.to_godot(me.sim.pos), Vector3.UP)
+			return
+		start += span
+	_sa_time = -1.0
+
 ## An X-Mine looking for a target from where it lies.
 func _mine_target(owner_id: int, at: Vector2, detect_range: float) -> MechSim:
 	var players := []
@@ -2591,7 +2871,7 @@ func _record_hit(victim_id: int, attacker_id: int, amount: int, remaining: int, 
 	var victim: Mech = mechs[victim_id]
 	victim.sim.life = remaining
 	if _netlog:
-		print("  hit %d -> %d: %d with %s, %d left" % [attacker_id, victim_id, amount, GameData.weapon(weapon_id).name, remaining])
+		print("  hit %d -> %d: %d with %s, %d left" % [attacker_id, victim_id, amount, GameData.weapon(weapon_id).name if weapon_id > 0 else "Grab", remaining])
 	# Hitting a teammate (splash) earns no points; the kill still counts (kill_user_num).
 	if stats.has(attacker_id) and not Room.teammates(victim.team, _team_of_id(attacker_id)):
 		(stats[attacker_id] as Stats).damage += amount
@@ -2599,6 +2879,9 @@ func _record_hit(victim_id: int, attacker_id: int, amount: int, remaining: int, 
 		victim.view.play_damage()
 	elif stats.has(attacker_id) and attacker_id != victim_id:
 		(stats[attacker_id] as Stats).kills += 1
+	# The grab's hits have no weapon: no hit sound or mark of their own (the grab plays its).
+	if weapon_id <= 0:
+		return
 	# myplayer_is_damaged: the EMP blanks your radar for jamming_time, any hit, even 0.
 	var jamming := GameData.weapon(weapon_id).mode_num("jamming_time")
 	if victim_id == local_id and jamming > 0.0:
@@ -2703,6 +2986,49 @@ func _combo_keys(it: MechSim.Intent, facing: int, t: float) -> void:
 	elif t >= 0.31 and t < 0.34:
 		it.set(fwd, true)
 
+## Test option "autograb=N": walk up to the nearest enemy, grab it and enter grab combo N (the
+## body's special needs life at a tenth: add hp= to start low).
+var _autograb := _arg_int("autograb=")
+var _grab_feed := 0
+func _autograb_intent(m: Mech, enemy: Mech) -> MechSim.Intent:
+	var it := MechSim.Intent.new()
+	it.aim = enemy.sim.pos
+	# A special needs a tenth of life or less: the test driver starts there.
+	if (_autograb == 5 or _autograb > 8) and m.sim.life > m.sim.life_max / 10:
+		m.sim.life = m.sim.life_max / 10
+	if m.sim.grab == MechSim.Grab.CATCH:
+		# One key of the combo every other frame, as presses and releases.
+		var keys: Array = Bodies.grab_combo(_autograb).get("key", [])
+		var i := _grab_feed / 2
+		if _grab_feed % 2 == 0 and i < keys.size():
+			match str(keys[i]).trim_prefix("COMBO_KEY_"):
+				"LEFT":
+					it.left = true
+				"RIGHT":
+					it.right = true
+				"UP":
+					it.up = true
+				"DOWN":
+					it.down = true
+				"LCLICK":
+					it.fire = true
+				"RCLICK":
+					it.boost = true
+		_grab_feed += 1
+		return it
+	_grab_feed = 0
+	if m.sim.grab != MechSim.Grab.NONE:
+		return it
+	var to := enemy.sim.pos - m.sim.pos
+	if to.length() > 40.0:
+		it.right = to.x > 10.0
+		it.left = to.x < -10.0
+		it.up = to.y > 10.0
+		it.down = to.y < -10.0
+	elif Original.vec2_from_deg(m.sim.facing).dot(to.normalized()) > 0.9:
+		it.grab = fmod(_clock, 0.4) < 0.2
+	return it
+
 var _stuck_check := 0.0
 var _stuck_from := Vector2.ZERO
 var _unstick_time := 0.0
@@ -2710,6 +3036,8 @@ func _autopilot_intent(m: Mech) -> MechSim.Intent:
 	_clock += get_physics_process_delta_time()
 	var it := MechSim.Intent.new()
 	var enemy := _nearest_enemy(m)
+	if _autograb > 0 and enemy:
+		return _autograb_intent(m, enemy)
 	if enemy == null:
 		var t := fmod(_clock, 6.0)
 		it.aim = m.sim.pos + Vector2(100, 0)

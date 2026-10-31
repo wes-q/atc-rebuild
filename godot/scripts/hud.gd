@@ -55,6 +55,9 @@ var blind := false:
 		if _blind:
 			_blind.visible = v
 var _blind: TextureRect
+## The special attack's flash (radar.cpp spattack_eff): sp_eff01.png over the whole screen,
+## on and off every 50 ms, three times, for the grabber and the one held.
+var _sp_flash: TextureRect
 var _gauge_w := {} ## bar name -> shown width, easing to the target
 var overlay: Node2D
 
@@ -66,7 +69,7 @@ var touch_help := false:
 			_help.text = TOUCH_HELP if v else KEY_HELP
 			# The buttons carry their own labels; the line would sit over the right stick.
 			_help.visible = not v
-const KEY_HELP := "WASD: move   Mouse: aim   Left: fire   Right: boost   Space: guard   Tab: players   +/-: camera   M: sound   Esc: menu"
+const KEY_HELP := "WASD: move   Mouse: aim   Left: fire   Right: boost   Space: guard   C: grab   Tab: players   +/-: camera   M: sound   Esc: menu"
 const TOUCH_HELP := "Left stick: move   Right stick: aim, push to fire   BOOST: hold   Combo: flick toward your facing, then fire"
 var _status: Label
 var _help: Label
@@ -105,6 +108,14 @@ func _ready() -> void:
 		_blind.visible = false
 		screen.add_child(_blind)
 		screen.move_child(_blind, 0)
+		_sp_flash = TextureRect.new()
+		_sp_flash.texture = OriginalUI.texture("ui2/game_fight/sp_eff01.png")
+		_sp_flash.size = SCREEN
+		_sp_flash.stretch_mode = TextureRect.STRETCH_SCALE
+		_sp_flash.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		_sp_flash.visible = false
+		screen.add_child(_sp_flash)
+		screen.move_child(_sp_flash, 1)
 	overlay = Node2D.new()
 	overlay.draw.connect(_draw_overlay)
 	screen.add_child(overlay)
@@ -477,7 +488,8 @@ func _draw_overlay() -> void:
 	# Lock-on markers, hidden while jammed (render_lock_on_system); lock-on still works.
 	if jam_time <= 0.0:
 		_draw_lock_marks()
-	# Under 10% life, SPAttack.png pulses below your mech.
+	# Under 10% life, SPAttack.png pulses below your mech: the special attack is ready (the
+	# grab's specials need a tenth of life or less; radar.cpp 942).
 	if _me_low and _me_alive:
 		var warn := OriginalUI.texture("ui2/game_fight/spattack.png")
 		if warn:
@@ -535,6 +547,16 @@ func _build_result() -> void:
 	_result_footer.add_theme_color_override("font_color", Color(0.65, 0.7, 0.8))
 	box.add_child(_result_footer)
 	_result.visible = false
+
+func sp_flash() -> void:
+	if _sp_flash == null:
+		return
+	var tw := create_tween()
+	for i in 3:
+		tw.tween_callback(func() -> void: _sp_flash.visible = true)
+		tw.tween_interval(0.05)
+		tw.tween_callback(func() -> void: _sp_flash.visible = false)
+		tw.tween_interval(0.05)
 
 ## start_ready_go: READY over the screen, shrinking 15 pixels every 0.05 s until it is gone,
 ## then after a pause GO, shrinking the same way about once a frame.

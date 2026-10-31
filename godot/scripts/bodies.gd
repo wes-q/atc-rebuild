@@ -194,3 +194,44 @@ static func sounds(id: int) -> Array:
 	for i in 3:
 		out.append(str(s[i]) if i < s.size() else "")
 	return out
+
+## The grab (clutch) clips each class's init loads (rcPlayer.cpp, the live anim_load lines),
+## by slot: dash (CLUTCH_DASH), catch (CLUTCH_START), hold (CLUTCH_BASE), held (CLUTCHED),
+## throw forward and back (FORCEOUT, FORCEOUT2), spark (SHOCK, which the drain combo also
+## plays), the special's hits (CRASH, KICK, KICK2) and the miss (FAIL). Gigas has its own grab
+## set; Red Kite, Deff and Alicia hold and throw with Zeid's.
+const GRAB_SLOTS: Array[String] = ["dash", "catch", "hold", "held", "throw", "throw_back", "spark", "crash", "kick", "kick2", "fail"]
+const _ZEID_GRAB := {
+	"dash": "clutch/zeid_clutch_start.x", "catch": "clutch/zeid_clutch_action.x",
+	"hold": "clutch/zeid_clutch_standard.x", "held": "clutch/zeid_clutch_clutched.x",
+	"throw": "clutch/zeid_clutch_push_foward.x", "throw_back": "clutch/zeid_clutch_push_back.x",
+	"spark": "clutch/zeid_clutch_spark.x",
+}
+static func grab_clips(body: String) -> Dictionary:
+	var own := {
+		"zeid": {"crash": "anim03/zeid_hit01.x", "kick": "anim03/zeid_hit02.x", "kick2": "anim/zeid_clutch_hit03.x", "fail": "anim/zeid_clutch_fail.x"},
+		"redkite": {"crash": "anim03/redkite_hit01.x", "kick": "anim03/redkite_hit02.x", "kick2": "anim/redkite_clutch_hit03.x", "fail": "anim/redkite_clutch_fail.x"},
+		"deff": {"crash": "anim03/deff_hit01.x", "kick": "anim03/deff_hit02.x", "kick2": "anim/deff_clutch_hit03.x", "fail": "anim/deff_clutch_fail.x"},
+		"alicia": {"crash": "anim03/zeid_hit01.x", "kick": "anim03/zeid_hit02.x", "kick2": "anim/zeid_clutch_hit03.x", "fail": "anim/deff_clutch_fail.x"},
+		"gigas": {"dash": "clutch/gigas_clutch_start.x", "catch": "clutch/gigas_clutch_action.x",
+			"hold": "clutch/gigas_clutch_standard.x", "held": "clutch/gigas_clutch_clutched.x",
+			"throw": "clutch/gigas_clutch_push_foward.x", "throw_back": "clutch/gigas_clutch_push_back.x",
+			"spark": "clutch/gigas_clutch_spark.x", "crash": "anim03/gigas_hit01.x",
+			"kick": "anim03/gigas_hit02.x", "kick2": "anim/gigas_clutch_hit03.x", "fail": "anim/gigas_clutch_fail.x"},
+	}
+	var out := _ZEID_GRAB.duplicate() if body != "gigas" else {}
+	out.merge(own.get(body, {}), true)
+	return out
+
+## A grab clip's length in seconds (each grab file holds one clip).
+static func grab_clip_time(body: String, slot: String) -> float:
+	var lengths := clip_lengths(str(grab_clips(body).get(slot, "")))
+	return float(lengths[0]) if not lengths.is_empty() else 0.5
+
+## clutch_combo_parameter.lua, by id (1 to 12), or {} for none.
+static func grab_combo(id: int) -> Dictionary:
+	_load()
+	for c in _params.get("clutch_combo_parameter", []):
+		if int(c.get("id", 0)) == id:
+			return c
+	return {}

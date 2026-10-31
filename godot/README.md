@@ -324,7 +324,8 @@ that and scaled to the window.
 - Off-screen players: a marker on a 180-pixel ring round the screen centre: the friend image
   for teammates, the brighter enemy image for the nearest enemy, the dim one for the rest.
   Markers and the names floating over mechs are green in free-for-all, red or blue in teams.
-- Under 10% HP, the SPAttack warning pulses under your mech.
+- Under 10% HP, the SPAttack sign pulses under your mech: your special attack is ready (see
+  the grab, below).
 - With a shield, the guard gauge rides under your mech (`guard_gage`, moved every frame by
   `updateguard`): HP, shield and bit bars, each easing to its new width over 0.5 s.
 - After an EMP hit the radar's enemy dots, the edge markers and the lock-on marks are hidden
@@ -369,6 +370,7 @@ states a second.
 | Mouse | Aim. The mech turns toward the cursor at its turn rate |
 | 1 / 2 / 3 / 4 | The body's weapon slots (not while firing, a burst is out, a combo plays or a bow draws). Drops the guard |
 | Space | Raise or lower the guard (toggle) |
+| C | Grab: a dash ahead that catches whoever it meets; then the grab's combo keys |
 | Left click | Attack with the selected weapon. One click, one attack, except: hold the Heavy Machinegun or Plasma Shock Wave to keep firing; hold the Plasma Bow to charge and let go to shoot; let go of the Cluster Cannon to burst its shells in the air. With a sword, tap toward your facing then click, or away, toward, click, for a command combo |
 | F | Next lock-on target, with the missile launcher |
 | Right click (hold) | Boost, draining the gauge |
@@ -670,6 +672,63 @@ own numbers.
 the shipped client cannot reach it: the F-key handler that would select it is commented out
 in `rcManager.cpp`.
 
+## The grab and the special attacks (Step 18, from `rcClutch.cpp`, `rcPlayer.cpp` and
+`rcManager.cpp` `update_clutch`, `clutch_combo_parameter.lua`, `radar.cpp`, `dxcamera.cpp`)
+
+The original's grab ("clutch") on **C**, and each body's special attack, which is a grab
+finisher.
+
+- **The dash:** C starts a dash straight along your facing at 2.8 x your walking speed, up
+  to 90 units; a wall stops it. It catches anyone within 24 units and roughly ahead: the
+  original meant a 40-degree cone but took the cosine of 20 radians, so the cone is
+  +-66 degrees, kept here. Not a teammate, not a mech that is down, intangible or frozen.
+  The target's guard does not stop it, and you can grab out of your own guard (which drops).
+  5 s between grabs, counted from the start of the round too.
+- **A miss:** a second standing, then the miss clip.
+- **The hold:** the one caught is pinned 21 units in front of you and can do nothing. You have
+  1.5 s to enter a grab combo; without one the grab fails and lets go. The one held frees
+  itself after 4 s whatever happens, as the original's failsafe did.
+- **Grab combos:** one per grab, and it ends the grab. Keys are screen directions, not your
+  facing. Only the keys that end what you typed count, so earlier wrong keys do not matter.
+
+| Keys | What it does |
+|---|---|
+| a direction, then left click | Throw 75 units that way (right, up, left or down the screen), 5 damage, 1.5 s stun |
+| left, right, right click | Spark: 70 damage, push 30 along your facing |
+| right, right, left, left, right click | Drain: 45 damage, and you gain 30 HP at once |
+| right, up, down, left, up, right, left, down, right click | A showy release: no damage |
+| your body's special (below) | Only at 10% HP or less |
+
+- **Special attacks** (at 10% HP or less, while holding someone):
+
+| Body | Keys, then right click | Each hit | Total (6 hits) |
+|---|---|---|---|
+| Zeid | right right left right left down right | 35 | 210 |
+| Red Kite | right left right left down right right | 37 | 222 |
+| Gigas | left down right left right left down right | 40 | 240 |
+| Deff | right left down right left down right | 37 | 222 |
+| Alicia | left down right left down right left | 35 | 210 |
+
+  Five hits as the clips play (hit, hit, hit, kick, kick), then a last one when the time is
+  up (7 x the first clip). Each takes 500 from your booster. It plays `sa.ogg`, flashes
+  `sp_eff01.png` over the screens of you and the one held (three blinks), and swings your
+  camera through three close views for 3.2 s. The one held is pushed 120 units and stunned
+  0.5 s after. The SPAttack sign under your mech at low HP says it is ready.
+- **Bodies:** Gigas has its own grab clips; Red Kite, Deff and Alicia hold and throw with
+  Zeid's, with their own hits and miss.
+- **Who decides:** your machine finds who the dash meets and asks the host, which keeps one
+  lock per held mech (the server's `is_clutch`) and tells everyone. Your machine runs the
+  combo and sends its hits; the one held moves and frees its own mech.
+- **Touch:** GRAB beside LOCK; during a hold the left stick's flicks are the directions,
+  fire is the left click and BOOST the right click.
+
+Not like the original, or inferred: the combo directions also take WASD (the original read
+the arrow keys only, with WASD commented out); the one held shows its usual pose while
+stunned after a combo (the clip it played then is not named); the practice dummy does not
+grab (the original's computer players did, mostly the spark, and their specials below 20%).
+Test option `autograb=N`: the autopilot walks up, grabs and enters grab combo N (for a
+special it drops its own HP to a tenth first).
+
 ## Particle effects (from `psys.cpp`, `billboard.cpp`, `engine.cpp`)
 
 A frame named `p<group>:<script>` in a model runs particle scripts from
@@ -819,5 +878,5 @@ tools/ui_demo.gd            drives the front end with synthetic input, for check
 tools/room_demo.gd          joins a room another copy hosts, through the room list, with synthetic input
 tools/shop_demo.gd          equips a weapon in the item shop with synthetic input
 tools/extract_ui.py         reads the HUD window tables and particle scripts, copies their art
-tests/test_mech_sim.gd      300 checks against the original database values and rules
+tests/test_mech_sim.gd      319 checks against the original database values and rules
 ```
