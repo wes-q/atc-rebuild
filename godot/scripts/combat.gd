@@ -29,8 +29,10 @@ static func bow_stun_time(charge: int) -> float:
 const BOW_PUSH := 200.0
 
 ## rc_bullet::is_crash for an immediate line: segment against the mech's sphere, no width.
-static func line_hits(a: Vector2, b: Vector2, at: Vector2, mech_radius: float) -> bool:
-	return Geometry2D.get_closest_point_to_segment(at, a, b).distance_to(at) <= mech_radius
+## lift: the mech's height (a jump); the line is taken on the ground (inferred).
+static func line_hits(a: Vector2, b: Vector2, at: Vector2, mech_radius: float, lift := 0.0) -> bool:
+	var d := Geometry2D.get_closest_point_to_segment(at, a, b).distance_to(at)
+	return sqrt(d * d + lift * lift) <= mech_radius
 
 ## World::find_nearest_other_player_index for an X-Mine: the nearest player other than the
 ## owner; none if that one is dead or farther than the range (detecting_area, not scaled).

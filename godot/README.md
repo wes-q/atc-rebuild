@@ -324,7 +324,8 @@ that and scaled to the window.
 - Off-screen players: a marker on a 180-pixel ring round the screen centre: the friend image
   for teammates, the brighter enemy image for the nearest enemy, the dim one for the rest.
   Markers and the names floating over mechs are green in free-for-all, red or blue in teams.
-- Under 10% HP, the SPAttack warning pulses under your mech.
+- Under 10% HP, the SPAttack sign pulses under your mech: your special attack is ready (see
+  the grab, below).
 - With a shield, the guard gauge rides under your mech (`guard_gage`, moved every frame by
   `updateguard`): HP, shield and bit bars, each easing to its new width over 0.5 s.
 - After an EMP hit the radar's enemy dots, the edge markers and the lock-on marks are hidden
@@ -369,6 +370,9 @@ states a second.
 | Mouse | Aim. The mech turns toward the cursor at its turn rate |
 | 1 / 2 / 3 / 4 | The body's weapon slots (not while firing, a burst is out, a combo plays or a bow draws). Drops the guard |
 | Space | Raise or lower the guard (toggle) |
+| C | Grab: a dash ahead that catches whoever it meets; then the grab's combo keys |
+| X | Jump: a one-second hop that most attacks pass under. Every 5 s |
+| Shift | Shove: knocks everyone close by away from you. Every 20 s |
 | Left click | Attack with the selected weapon. One click, one attack, except: hold the Heavy Machinegun or Plasma Shock Wave to keep firing; hold the Plasma Bow to charge and let go to shoot; let go of the Cluster Cannon to burst its shells in the air. With a sword, tap toward your facing then click, or away, toward, click, for a command combo |
 | F | Next lock-on target, with the missile launcher |
 | Right click (hold) | Boost, draining the gauge |
@@ -670,6 +674,95 @@ own numbers.
 the shipped client cannot reach it: the F-key handler that would select it is commented out
 in `rcManager.cpp`.
 
+## The grab and the special attacks (Step 18, from `rcClutch.cpp`, `rcPlayer.cpp` and
+`rcManager.cpp` `update_clutch`, `clutch_combo_parameter.lua`, `radar.cpp`, `dxcamera.cpp`)
+
+The original's grab ("clutch") on **C**, and each body's special attack, which is a grab
+finisher.
+
+- **The dash:** C starts a dash straight along your facing at 2.8 x your walking speed, up
+  to 90 units; a wall stops it. It catches anyone within 24 units and roughly ahead: the
+  original meant a 40-degree cone but took the cosine of 20 radians, so the cone is
+  +-66 degrees, kept here. Not a teammate, not a mech that is down, intangible or frozen.
+  The target's guard does not stop it, and you can grab out of your own guard (which drops).
+  5 s between grabs, counted from the start of the round too.
+- **A miss:** a second standing, then the miss clip.
+- **The hold:** the one caught is pinned 21 units in front of you and can do nothing. You have
+  1.5 s to enter a grab combo; without one the grab fails and lets go. The one held frees
+  itself after 4 s whatever happens, as the original's failsafe did.
+- **Grab combos:** one per grab, and it ends the grab. Keys are screen directions, not your
+  facing. Only the keys that end what you typed count, so earlier wrong keys do not matter.
+
+| Keys | What it does |
+|---|---|
+| a direction, then left click | Throw 75 units that way (right, up, left or down the screen), 5 damage, 1.5 s stun |
+| left, right, right click | Spark: 70 damage, push 30 along your facing |
+| right, right, left, left, right click | Drain: 45 damage, and you gain 30 HP at once |
+| right, up, down, left, up, right, left, down, right click | A showy release: no damage |
+| your body's special (below) | Only at 10% HP or less |
+
+- **Special attacks** (at 10% HP or less, while holding someone):
+
+| Body | Keys, then right click | Each hit | Total (6 hits) |
+|---|---|---|---|
+| Zeid | right right left right left down right | 35 | 210 |
+| Red Kite | right left right left down right right | 37 | 222 |
+| Gigas | left down right left right left down right | 40 | 240 |
+| Deff | right left down right left down right | 37 | 222 |
+| Alicia | left down right left down right left | 35 | 210 |
+
+  Five hits as the clips play (hit, hit, hit, kick, kick), then a last one when the time is
+  up (7 x the first clip). Each takes 500 from your booster. It plays `sa.ogg`, flashes
+  `sp_eff01.png` over the screens of you and the one held (three blinks), and swings your
+  camera through three close views for 3.2 s. The one held is pushed 120 units and stunned
+  0.5 s after. The SPAttack sign under your mech at low HP says it is ready.
+- **Bodies:** Gigas has its own grab clips; Red Kite, Deff and Alicia hold and throw with
+  Zeid's, with their own hits and miss.
+- **Who decides:** your machine finds who the dash meets and asks the host, which keeps one
+  lock per held mech (the server's `is_clutch`) and tells everyone. Your machine runs the
+  combo and sends its hits; the one held moves and frees its own mech.
+- **Touch:** GRAB left of LOCK and GUARD; during a hold the left stick's flicks are the directions,
+  fire is the left click and BOOST the right click.
+
+Not like the original, or inferred: the combo directions also take WASD (the original read
+the arrow keys only, with WASD commented out); the one held shows its usual pose while
+stunned after a combo (the clip it played then is not named); the practice dummy does not
+grab (the original's computer players did, mostly the spark, and their specials below 20%).
+Test option `autograb=N`: the autopilot walks up, grabs and enters grab combo N (for a
+special it drops its own HP to a tenth first).
+
+## The jump and the shove (Step 19, from `dxinput.cpp`, `rcManager.cpp` `update_my_input` and
+`updateshove`, `rcPlayer.cpp` `set_ymove` and `shove`, `world.cpp` `receive_shove`, `rcAmmo.cpp`)
+
+Two moves the original reads from the keyboard beside the grab: X (option.ini `AVOID`) and
+Left Shift (`DIK_LSHIFT`; either Shift here).
+
+- **The jump:** the mech rises and falls over one second, `pos.y = sin(pi t) x 200` (not
+  scaled), then lands. The original's camera sits at `y = -depth`, so the hop carries the
+  mech away from the camera: it shrinks and comes back. Every 5 s, ready from the start. Not
+  while grabbing or held (any grab state but the wait to be let go); it is read before the
+  grab, so C pressed in the air still dashes. Every machine shows it (move message 77).
+- **What a jump avoids:** every hit test in the original measures from the mech's centre at
+  its height to an attack on the ground: shots (`bullet_center.y = 0`), sword arcs, splash and
+  the grab's reach. So a mech more than its collision size up is out of reach, most of the
+  hop. Beams are taken on the ground too (inferred: their line starts at the muzzle, whose
+  height is not traced).
+- **The shove:** the mech plays its push clip (`PLAYERANIM_ETC` clip 0) and 0.2 s later
+  `character_twing.X` bursts where it is. Everyone within 90 units (300 x 0.3, centres
+  measured with heights) is dashed straight away from it: 120 units for Zeid, 135 for Red
+  Kite, Deff and Alicia, 150 for Gigas (`shoved_distance` x 0.3). No damage and no team test,
+  so teammates are pushed too. Every 20 s, ready from the start. It has no grab test: a held
+  mech can shove, which pushes its grabber away but does not end the grab (the combo still
+  lands). A grabber shoved during its dash misses.
+- **Computer players:** one that is caught shoves at once, with no recharge (`pt_recv_clutch_catch`,
+  `pt_send_npc_shove`, skipped on easy). The practice dummy does this.
+- **Who decides:** the shover's machine sends the shove; each machine pushes the mechs it
+  runs, from where it sees the shover, as each client did on `RG_SHOVE_ACK`.
+- **Touch:** SHOVE, GRAB and JUMP in a column left of LOCK and GUARD.
+
+Test option `autododge`: the autopilot hops whenever the jump is ready and shoves anyone within
+reach.
+
 ## Particle effects (from `psys.cpp`, `billboard.cpp`, `engine.cpp`)
 
 A frame named `p<group>:<script>` in a model runs particle scripts from
@@ -717,6 +810,9 @@ parts added to the base stats.
 
 ## Known gaps
 
+- Mechs pass through each other. The original pushed overlapping mechs 15 units apart
+  (`World::update_crash_check`, `crash_with_other`), except during a grab.
+
 - The fight HUD's weapon icons stop at id 25, so weapons from the shop's later ranges show
   no icon in the weapon panel, as in the original.
 - The Napalm Thrower's attack clips (`anim03/g_napalm.x`) crash assimp's glTF exporter, as
@@ -734,8 +830,8 @@ parts added to the base stats.
   is assumed to match.
 - A shield is whole again each round. The original set durability only when the player was
   created, and each of its matches was a new game (inferred).
-- The guard break's own clip (`PLAYERANIM_ETC` clip 1) is not identified; the break shows
-  only `shield_crash.x`. A pierce hit through a guard keeps the guard pose rather than
+- The guard break plays `PLAYERANIM_ETC` clip 1 in the original, but the guard cancel that
+  follows replaces it once its echo returns, so here the break shows only `shield_crash.x`. A pierce hit through a guard keeps the guard pose rather than
   playing a hit reaction (inferred).
 - The guard gauge's easing curve is assumed linear.
 - Halving damage while an energy-shield bullet is out (`damage_to_mul` 0.5) and the repair
@@ -819,5 +915,5 @@ tools/ui_demo.gd            drives the front end with synthetic input, for check
 tools/room_demo.gd          joins a room another copy hosts, through the room list, with synthetic input
 tools/shop_demo.gd          equips a weapon in the item shop with synthetic input
 tools/extract_ui.py         reads the HUD window tables and particle scripts, copies their art
-tests/test_mech_sim.gd      300 checks against the original database values and rules
+tests/test_mech_sim.gd      319 checks against the original database values and rules
 ```

@@ -69,6 +69,8 @@ func _init() -> void:
 	test_state_rate()
 	test_step17_states()
 	test_step17_shots()
+	test_grab()
+	test_jump_and_shove()
 	print("\n%d passed, %d failed" % [passed, failures])
 	quit(1 if failures > 0 else 0)
 
@@ -1472,3 +1474,128 @@ func test_step17_shots() -> void:
 	check(mp.child_count() == 2 and is_equal_approx(mp.life, 0.1), "MP7-C3: 0.1 s, then 2")
 	for x in [b, d, ptl, mp]:
 		x.free()
+
+func test_grab() -> void:
+	print("grab (rcClutch.cpp, rcPlayer.cpp update_clutch, clutch_combo_parameter.lua)")
+	var K := MechSim.GrabKey
+	check(is_equal_approx(MechSim.GRAB_CONE_COS, cos(20.0)), "the catch cone uses cos(20) in radians, as the original did: +-65.9 degrees")
+	check(MechSim.grab_match([K.RIGHT, K.LCLICK], "zeid", 700, 700) == 1, "right then left click: the throw to the right (1)")
+	check(MechSim.grab_match([K.UP, K.DOWN, K.LEFT, K.LCLICK], "zeid", 700, 700) == 3, "earlier wrong keys do not matter: the keys that end the buffer count")
+	check(MechSim.grab_match([K.LEFT, K.RIGHT, K.RCLICK], "gigas", 1000, 1000) == 6, "left, right, right click: the spark (6), any body")
+	var zeid_special: Array[int] = [K.RIGHT, K.RIGHT, K.LEFT, K.RIGHT, K.LEFT, K.DOWN, K.RIGHT, K.RCLICK]
+	check(MechSim.grab_match(zeid_special, "zeid", 70, 700) == 5, "Zeid's special at a tenth of life")
+	check(MechSim.grab_match(zeid_special, "zeid", 71, 700) == 0, "and not above it")
+	check(MechSim.grab_match(zeid_special, "redkite", 80, 850) == 0, "nor for another body")
+	check(MechSim.grab_push(1, 180) == Vector2(75, 0) and MechSim.grab_push(4, 0) == Vector2(0, -75), "throws 1 to 4 go along the screen's axes, 250 x 0.3")
+	check(MechSim.grab_push(6, 90).is_equal_approx(Original.vec2_from_deg(90) * 30.0), "the others along the grabber's facing")
+	var g := MechSim.new("zeid", 1)
+	g.reset_at(Vector2.ZERO, 0)
+	var press := MechSim.Intent.new()
+	press.grab = true
+	press.aim = Vector2(1000, 0)
+	g.step(press, 1.0 / 60.0)
+	check(g.grab == MechSim.Grab.NONE, "no grab in the first 5 s (the cooldown starts at 0)")
+	var idle := MechSim.Intent.new()
+	idle.aim = Vector2(1000, 0)
+	for i in 300:
+		g.step(idle, 1.0 / 60.0)
+	g.step(press, 1.0 / 60.0)
+	check(g.grab == MechSim.Grab.DASH and g.grab_clip == "dash", "C after 5 s: the dash")
+	for i in 120:
+		g.step(idle, 1.0 / 60.0)
+		if g.grab != MechSim.Grab.DASH:
+			break
+	check(g.grab == MechSim.Grab.MISSED and is_equal_approx(g.pos.length(), MechSim.GRAB_DASH_RANGE) or g.pos.length() > MechSim.GRAB_DASH_RANGE - 6.0, "nobody met: it ends after 90 units (%.0f)" % g.pos.length())
+	for i in 70:
+		g.step(idle, 1.0 / 60.0)
+	check(g.grab == MechSim.Grab.FAIL and g.grab_clip == "fail", "a second's stand, then the miss clip")
+	var a := MechSim.new("gigas", 1)
+	a.reset_at(Vector2.ZERO, 0)
+	var v := MechSim.new("zeid", 1)
+	v.reset_at(Vector2(15, 0), 180)
+	a.grab_caught(2)
+	v.grab_held(1, a.pos, a.facing)
+	var done := [0]
+	a.grab_combo_done.connect(func(id: int) -> void: done[0] = id)
+	var keys := [[1, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 1, 0]]
+	for k: Array in keys:
+		var it := MechSim.Intent.new()
+		it.right = k[0] == 1
+		it.fire = k[4] == 1
+		it.aim = Vector2(1000, 0)
+		a.step(it, 1.0 / 60.0)
+	check(a.grab == MechSim.Grab.COMBO and a.grab_combo == 1, "holding, right then click: combo 1 starts")
+	for i in 60:
+		a.step(idle, 1.0 / 60.0)
+		v.step(idle, 1.0 / 60.0)
+	check(done[0] == 1 and a.grab == MechSim.Grab.NONE, "it runs its clip's time less 0.15 s, then the grab is over")
+	check(v.is_grabbed() and v.pos.distance_to(Vector2(MechSim.GRAB_HOLD_OFFSET, 0)) < 1.0, "the one held was drawn 21 units in front of the grabber")
+	var freed := [false]
+	v.grab_release.connect(func() -> void: freed[0] = true)
+	v.grab_thrown(MechSim.grab_push(1, 0), 1.5)
+	for i in 100:
+		v.step(idle, 1.0 / 60.0)
+	check(freed[0] and v.pos.x > 80.0, "thrown 75 units, stunned 1.5 s, then it frees itself")
+
+func test_jump_and_shove() -> void:
+	print("jump and shove (rcPlayer.cpp set_ymove and shove, world.cpp receive_shove)")
+	var dt := 1.0 / 60.0
+	var m := MechSim.new("zeid", 1)
+	m.reset_at(Vector2.ZERO, 0)
+	var idle := MechSim.Intent.new()
+	idle.aim = Vector2(1000, 0)
+	var jump := MechSim.Intent.new()
+	jump.jump = true
+	jump.aim = Vector2(1000, 0)
+	var hops := [0]
+	m.jumped.connect(func() -> void: hops[0] += 1)
+	m.step(jump, dt)
+	check(hops[0] == 1 and m.jump_time >= 0.0, "X at the start: the hop is ready from the first second")
+	run(m, idle, 0.5 - dt)
+	check(near(m.height(), MechSim.JUMP_HEIGHT, 1.0), "half way, 200 units up (%.0f)" % m.height())
+	run(m, idle, 0.6)
+	check(m.height() == 0.0 and m.jump_time < 0.0, "down again after a second")
+	m.step(jump, dt)
+	check(hops[0] == 1, "no second hop before 5 s")
+	run(m, idle, 4.0)
+	m.step(jump, dt)
+	check(hops[0] == 2, "another once 5 s have passed")
+	run(m, idle, 0.5)
+	check(near(m.lifted(10.0), sqrt(100.0 + m.height() * m.height())), "a hit test measures to the mech at its height")
+	var b := Bullet.new()
+	b.weapon = GameData.weapon(m.slots[1].data.id)
+	b.prev_pos = Vector2(-50, 0)
+	b.plane_pos = Vector2(50, 0)
+	check(b.hits(Vector2.ZERO, m.crash_radius) and not b.hits(Vector2.ZERO, m.crash_radius, m.height()), "a shot through the mech's spot passes under it in the air")
+	b.free()
+	var g := MechSim.new("gigas", 1)
+	g.reset_at(Vector2.ZERO, 0)
+	var held_hops := [0]
+	g.jumped.connect(func() -> void: held_hops[0] += 1)
+	g.grab_caught(2)
+	g.step(jump, dt)
+	check(held_hops[0] == 0, "no hop while holding someone")
+	var s := MechSim.new("gigas", 1)
+	s.reset_at(Vector2.ZERO, 0)
+	var shoves := [0]
+	s.shoved.connect(func() -> void: shoves[0] += 1)
+	var shove := MechSim.Intent.new()
+	shove.shove = true
+	shove.aim = Vector2(1000, 0)
+	s.grab_held(1, Vector2(-21, 0), 0)
+	s.step(shove, dt)
+	check(shoves[0] == 1, "Shift at the start shoves, even while held")
+	s.step(idle, dt)
+	s.step(shove, dt)
+	run(s, idle, 19.0)
+	s.step(idle, dt)
+	s.step(shove, dt)
+	check(shoves[0] == 1, "not again within 20 s")
+	run(s, idle, 1.0)
+	s.step(shove, dt)
+	check(shoves[0] == 2, "again after 20 s")
+	check(MechSim.shove_push("gigas", Vector2.ZERO, 0.0, Vector2(60, 0), 0.0).is_equal_approx(Vector2(150, 0)), "Gigas pushes a mech 60 units off 150 units away (500 x 0.3)")
+	check(MechSim.shove_push("zeid", Vector2.ZERO, 0.0, Vector2(0, -89), 0.0).is_equal_approx(Vector2(0, -120)), "Zeid's push is 120, out to 90 units")
+	check(MechSim.shove_push("zeid", Vector2.ZERO, 0.0, Vector2(91, 0), 0.0) == Vector2.ZERO, "nothing beyond 90 units")
+	check(MechSim.shove_push("zeid", Vector2.ZERO, 0.0, Vector2(30, 0), 150.0) == Vector2.ZERO, "nor a mech high in a hop")
+

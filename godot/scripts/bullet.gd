@@ -140,11 +140,13 @@ func _steer() -> void:
 
 ## rc_bullet::is_crash, NORMAL type: distance from the mech to this frame's path. A weapon
 ## with no collision_type (the Void Pulse, D Fielder and Over Booster objects) never hits.
-func hits(at: Vector2, mech_radius: float) -> bool:
+## lift: the mech's height (a jump); the path runs on the ground (bullet_center.y = 0).
+func hits(at: Vector2, mech_radius: float, lift := 0.0) -> bool:
 	if weapon.collision_type == 0:
 		return false
 	var closest := Geometry2D.get_closest_point_to_segment(at, prev_pos, plane_pos)
-	return closest.distance_to(at) <= mech_radius + radius
+	var d := closest.distance_to(at)
+	return sqrt(d * d + lift * lift) <= mech_radius + radius
 
 func _orient() -> void:
 	position = Original.to_godot(plane_pos)

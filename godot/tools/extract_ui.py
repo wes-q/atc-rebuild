@@ -40,6 +40,8 @@ EXTRA_IMAGES = [
     # (radar.cpp BlindBeamState).
     "texture01/Chain.png",
     "ui2/game_fight/blind_eff.png",
+    # Step 18: the special attack's screen flash (radar.cpp spattack_eff).
+    "ui2/game_fight/sp_eff01.PNG",
     # The front end's art named in script code rather than tables: the highlight glow, the
     # animated cursor (page_login_new), the loading screen (Loading_window_create) and the
     # exit picture (I_robot_img_show).
@@ -422,9 +424,11 @@ def main() -> None:
     print(f"{len(particles)} particle scripts, {textures} new particle textures")
 
     # Weapon and weapon-mode tables, the body colour schemes and the sword command combos, as
-    # data for the game. The combo keys are C++ enum names, so they stay strings.
+    # data for the game, with the grab (clutch) combos. The combo keys are C++ enum names, so
+    # they stay strings.
     tables: dict = {}
-    for name in ("weapon_parameter", "weapon_mode_parameter", "character_mapping_parameter", "combo_parameter"):
+    for name in ("weapon_parameter", "weapon_mode_parameter", "character_mapping_parameter", "combo_parameter",
+                 "clutch_combo_parameter"):
         src = data_dir / "script" / "parameter" / f"{name}.lua"
         chunk = Parser(tokenize(src.read_bytes().decode("cp949", errors="replace"))).chunk()
         tables.update({k: resolve(v, chunk) for k, v in chunk.items() if isinstance(v, (dict, list))})

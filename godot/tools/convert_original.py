@@ -87,6 +87,13 @@ SOUNDS = [
     "sound/ui/countdown 2-04",
     "sound/ui/countdown 1-05",
     "sound/ui/ready go",           # start_ready_go: READY and GO at the start of a battle
+    "sound/clutch_start",          # the grab (clutch): the dash starts (rcManager.cpp update_clutch)
+    "sound/clutch_success",        # a grab catches someone (pt_recv_clutch_catch)
+    "sound/clutch_throw",          # grab combos 1-4, the throws
+    "sound/clutch_spark",          # grab combo 6
+    "sound/drain",                 # grab combo 7
+    "sound/common/sa",             # a special attack starts
+    "sound/finish",                # a special attack's last hit
 ]
 
 # BGM::load play list in index order. A match plays rand() % 19; 19 is victory, 23 defeat.
@@ -551,6 +558,46 @@ GUARD_FILES = {
 # World::receive_guard: a blocked hit, and the shield breaking. World::state_change: the
 # Impact Pulse-Gun's AddDamageState mark.
 GUARD_EFFECTS = ("weapon/character_block.X", "weapon/shield_crash.X", "weapon01/defence_down.X")
+# The grab (clutch) clips every body loads (rcPlayer.cpp, each class's init: the live
+# anim_load( PLAYERANIM_CLUTCH_* ) lines). Gigas has its own grab pack; Red Kite, Deff and
+# Alicia reuse Zeid's with their own hit, drain and fail clips.
+GRAB_ANIMS = (
+    "anim/deff_clutch_drain.x",
+    "anim/deff_clutch_fail.x",
+    "anim/deff_clutch_hit03.x",
+    "anim/gigas_clutch_drain.x",
+    "anim/gigas_clutch_fail.x",
+    "anim/gigas_clutch_hit03.x",
+    "anim/redkite_clutch_drain.x",
+    "anim/redkite_clutch_fail.x",
+    "anim/redkite_clutch_hit03.x",
+    "anim/zeid_clutch_drain.x",
+    "anim/zeid_clutch_fail.x",
+    "anim/zeid_clutch_hit03.x",
+    "anim01/ali_clutch_spark.x",
+    "anim03/deff_hit01.x",
+    "anim03/deff_hit02.x",
+    "anim03/gigas_hit01.x",
+    "anim03/gigas_hit02.x",
+    "anim03/redkite_hit01.x",
+    "anim03/redkite_hit02.x",
+    "anim03/zeid_hit01.x",
+    "anim03/zeid_hit02.x",
+    "clutch/gigas_clutch_action.x",
+    "clutch/gigas_clutch_clutched.x",
+    "clutch/gigas_clutch_push_back.x",
+    "clutch/gigas_clutch_push_foward.x",
+    "clutch/gigas_clutch_spark.x",
+    "clutch/gigas_clutch_standard.x",
+    "clutch/gigas_clutch_start.x",
+    "clutch/zeid_clutch_action.x",
+    "clutch/zeid_clutch_clutched.x",
+    "clutch/zeid_clutch_push_back.x",
+    "clutch/zeid_clutch_push_foward.x",
+    "clutch/zeid_clutch_spark.x",
+    "clutch/zeid_clutch_standard.x",
+    "clutch/zeid_clutch_start.x"
+)
 # The step 17 weapons' state effects, named only in world.cpp's state_change and
 # rcPlayerState.cpp: the burn, drain, booster, defence field, reverse, freeze and blind marks,
 # the leech bomb's blast and its defusing.
@@ -558,6 +605,12 @@ STATE_EFFECTS = ("weapon01/fire_burn.X", "weapon01/drain_target_effect.X", "weap
                  "weapon01/D_Shield.X", "weapon01/reverse.X", "weapon01/freezed.x", "weapon01/blind_01.X",
                  "weapon01/Leech_Bomb.X", "weapon/third_gigas_boom.x", "weapon/yokyuk_explo.x",
                  "weapon01/busterup.X")
+# The grab combos' effects (rcPlayer.cpp clutch_combo_action and the special's end).
+GRAB_EFFECTS = ("weapon/japki_drian.x", "weapon/bitFlash_eff.X", "weapon/japki_attack.x", "weapon/sword_hit.X")
+# The shove (rcPlayer::shove): each body's PLAYERANIM_ETC file (clip 0 the shove, clip 1 the
+# guard crash) and the burst it leaves 0.2 s in (character_twing.X).
+SHOVE_FILES = ("anim/zeid_etc.x", "anim/redkite_etc.x", "anim/gigas_etc.x", "anim/deff_etc.x",
+               "anim01/ali_etc.x", "weapon/character_twing.X")
 # weapon_parameter.lua field prefixes, by body.
 WEAPON_FIELD_PREFIX = {"zeid": "zeid", "redkite": "redkite", "gigas": "gigas", "deff": "deff", "alicia": "alicia"}
 WEAPON_EFFECT_FIELDS = ("bullet_xfile", "bullet_xfile2", "bullet_xfile3", "bullet_start_xfile", "bullet_dead_xfile",
@@ -615,6 +668,9 @@ def convert_bodies(data_dir: pathlib.Path, out_dir: pathlib.Path) -> None:
         wanted.update(files)
     wanted.update(GUARD_EFFECTS)
     wanted.update(STATE_EFFECTS)
+    wanted.update(GRAB_ANIMS)
+    wanted.update(GRAB_EFFECTS)
+    wanted.update(SHOVE_FILES)
     # The sword command combos' flashes (combo_parameter.lua).
     for combo in params.get("combo_parameter", []):
         for field in ("effect_name", "rotate_effect_name"):

@@ -6,8 +6,8 @@ extends CanvasLayer
 ## - Right stick: aim, turning the mech toward the drag. Pushed past a third of the way it
 ##   fires, holding the trigger for weapons that use a held button (streams, the bow's draw,
 ##   the Cluster Cannon) and clicking about eight times a second for the rest.
-## - Buttons: BOOST (the right mouse button, held), weapon slots 1 to 4, GUARD (Space),
-##   LOCK (F), PLAYERS (Tab), MENU (Esc), and between rounds START for the host and TEAM in
+## - Buttons: BOOST (the right mouse button, held), GRAB (C), JUMP (X), SHOVE (Shift), weapon
+##   slots 1 to 4, GUARD (Space), LOCK (F), PLAYERS (Tab), MENU (Esc), and between rounds START for the host and TEAM in
 ##   team battle. BOOST is the largest, beside GUARD under the right thumb, so the left thumb
 ##   keeps steering while it is held.
 ## A command combo is a flick of the left stick toward or away from your facing, then fire.
@@ -32,6 +32,9 @@ var aim := Vector2.ZERO ## screen space unit vector, zero before the first aim
 var firing := false
 var weapon_key := 0
 var guard := false
+var grab := false
+var jump := false
+var shove := false
 var boost := false
 var lock := false
 var players := false
@@ -160,6 +163,12 @@ func _button_down(name: String) -> void:
 			guard = true
 		"BOOST":
 			boost = true
+		"GRAB":
+			grab = true
+		"JUMP":
+			jump = true
+		"SHOVE":
+			shove = true
 		"LOCK":
 			lock = true
 		"PLAYERS":
@@ -179,13 +188,19 @@ func _button_up(name: String) -> void:
 			guard = false
 		"BOOST":
 			boost = false
+		"GRAB":
+			grab = false
+		"JUMP":
+			jump = false
+		"SHOVE":
+			shove = false
 		"LOCK":
 			lock = false
 		"PLAYERS":
 			players = false
 
 ## [name, centre] for each button shown now. The weapon row and GUARD and LOCK sit above the
-## right stick, PLAYERS on the left and MENU in the top-right corner, START and TEAM at the
+## right stick, SHOVE, GRAB and JUMP in a column to their left, PLAYERS on the left and MENU in the top-right corner, START and TEAM at the
 ## top centre.
 func _buttons() -> Array:
 	var w := _pad.size.x
@@ -196,6 +211,9 @@ func _buttons() -> Array:
 	out.append(["LOCK", Vector2(w - 360, h - 250)])
 	out.append(["GUARD", Vector2(w - 360, h - 160)])
 	out.append(["BOOST", Vector2(w - 290, h - 66)])
+	out.append(["SHOVE", Vector2(w - 440, h - 295)])
+	out.append(["GRAB", Vector2(w - 440, h - 205)])
+	out.append(["JUMP", Vector2(w - 440, h - 115)])
 	out.append(["PLAYERS", Vector2(56, 250)])
 	out.append(["MENU", Vector2(w - 56, 56)])
 	if show_start:
