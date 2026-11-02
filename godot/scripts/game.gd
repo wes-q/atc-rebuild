@@ -170,6 +170,7 @@ var _test_hp := _arg_int("hp=")
 var _dummy_near := _arg_int("dummy_near=")
 ## Autopilot: keep to this weapon slot (1 to 4) instead of cycling.
 var _autopilot_slot := _arg_int("slot=")
+var _autododge := OS.get_cmdline_user_args().has("autododge")
 ## Test option "capture=<dir>": saves 30 frames per second of real-time play as JPEGs.
 var _capture_dir := _arg_str("capture=")
 var _capture_time := 0.0
@@ -610,7 +611,11 @@ func _clear_bullets() -> void:
 		b.queue_free()
 	bullets.clear()
 	swings.clear()
-	# The step 17 states end with the round.
+	# The step 17 states and the grab's locks end with the round.
+	_grab_locks.clear()
+	_held_by.clear()
+	_grab_asked.clear()
+	_sa_time = -1.0
 	_ticks.clear()
 	for id in _leeches.keys():
 		_drop_leech(id)
@@ -1029,6 +1034,8 @@ func _net_refused(reason: String) -> void:
 	_back_to_rooms(reason)
 
 func _on_peer_disconnected(id: int) -> void:
+	if mode == "host":
+		_grab_forget(id)
 	_remove_mech(id)
 	_sitting_out.erase(id)
 	if mode == "host" and roster.has(id):
@@ -1384,6 +1391,8 @@ func _build_body(m: Mech, body: String, weapons: Array = []) -> void:
 	m.sim.charge_changed.connect(func(level: int) -> void: m.view.set_charge(level))
 	m.sim.guard_changed.connect(func(on: bool) -> void: _on_guard_changed(m, on))
 	if m.local or m.id == DUMMY_ID:
+		_connect_grab(m)
+		_connect_jump_shove(m)
 		m.sim.fired.connect(func(_o: Vector2, deg: int) -> void: _on_local_fired(m, deg))
 		m.sim.attack_started.connect(func(_w: int) -> void: m.burst_target = m.lock_target)
 		m.sim.swung.connect(func(_w: int, swing: int) -> void: _on_local_swing(m, swing))
@@ -1476,9 +1485,11 @@ func _step_swings(dt: float) -> void:
 			if victim == attacker or victim.sim.life <= 0 or victim.sim.is_pulse() or Room.teammates(victim.team, attacker.team):
 				continue
 			var rel := victim.sim.pos - attacker.sim.pos
-			if rel.length() >= w.crash_radius or rel.length_squared() < 0.0001:
+			# A jumping mech is measured at its height, the swing on the ground.
+			var reach := victim.sim.lifted(rel.length())
+			if reach >= w.crash_radius or reach < 0.01:
 				continue
-			if rad_to_deg(acos(clampf(rel.normalized().dot(facing), -1.0, 1.0))) >= w.collision_degree * 0.5:
+			if rad_to_deg(acos(clampf(rel.dot(facing) / reach, -1.0, 1.0))) >= w.collision_degree * 0.5:
 				continue
 			swings.remove_at(i)
 			BattleWorld.sword_hit(self, victim.sim.pos)
@@ -1600,6 +1611,8 @@ func _physics_process(dt: float) -> void:
 			m.sim.step(it, dt)
 		else:
 			m.sim.step_remote(dt)
+	_step_grabs()
+	_step_bumps(dt)
 	_step_bullets(dt)
 	_step_beams(dt)
 	_step_swings(dt)
@@ -1627,6 +1640,7 @@ func _physics_process(dt: float) -> void:
 					+ (" FRZ" if m.sim.freeze_time > 0.0 else "") + (" REV" if m.sim.reverse_time > 0.0 else "") + (" BLD" if m.sim.blind_time > 0.0 else "") \
 					+ (" FLD" if m.sim.field_time > 0.0 else "") + (" PWR" if m.sim.power_time > 0.0 else "") + (" WIRE" if m.sim.gravity_time > 0.0 else "") \
 					+ (" OVB" if m.sim.over_boost_time > 0.0 else "") + (" LEECH" if _leeches.has(m.id) else "") \
+					+ (" GRAB:%s" % MechSim.Grab.keys()[m.sim.grab] if m.sim.grab != MechSim.Grab.NONE else "") \
 					+ (" TICK%d" % _ticks.filter(func(t: Array) -> bool: return t[0] == m.id).size() if _ticks.any(func(t: Array) -> bool: return t[0] == m.id) else "")
 				parts.append("%s%d s%d t%d %s%s pos=(%d,%d) hp=%d sh=%d%s" % ["me" if m.local else "peer", m.id, m.slot, m.team, m.body, str(m.weapons).replace(" ", ""), m.sim.pos.x, m.sim.pos.y, m.sim.life, m.sim.durability, flags])
 			var mines := 0
@@ -1651,6 +1665,8 @@ func _process(dt: float) -> void:
 	hud.visible = not _in_room
 	if me and not _in_room:
 		_update_camera(_watched(), dt)
+		if _watched() == me:
+			_update_sa_camera(me, dt)
 	for m: Mech in mechs.values():
 		if not _in_room:
 			_draw_mech(m, dt)
@@ -1695,7 +1711,7 @@ func _process(dt: float) -> void:
 			_capture_index += 1
 
 func _draw_mech(m: Mech, dt: float) -> void:
-	m.view.place(m.sim.pos, m.sim.facing)
+	m.view.place(m.sim.pos, m.sim.facing, m.sim.height())
 	# Boost nozzles: "00" while boosting (start/stop_booster_particle); the directional ones
 	# burst on each new move, and against the old one on a stop (update_booster).
 	if m.sim.speed_state != m.prev_speed_state or not m.sim.move_dir.is_equal_approx(m.prev_move_dir):
@@ -1730,6 +1746,10 @@ func _draw_mech(m: Mech, dt: float) -> void:
 		else:
 			alpha = minf(alpha, float(_fading[m.id]))
 	m.view.set_alpha(alpha)
+	# The grab's clips (clutch states) take over from the rest while a grab is on.
+	if m.sim.grab_clip != "":
+		m.view.play_grab(m.sim.grab_clip, m.sim.grab_clip_serial)
+		return
 	# rcPlayer::move returns early in BEHAVE_GUARD: the guard pose holds while walking.
 	if m.sim.is_dead or m.sim.guarding or m.view.is_attack_playing() or m.view.is_reacting() or m.view.is_drawing():
 		return
@@ -1763,6 +1783,11 @@ func _read_intent(m: Mech) -> MechSim.Intent:
 	it.boost = Input.is_action_pressed("boost")
 	it.fire = Input.is_action_pressed("fire")
 	it.guard = Input.is_physical_key_pressed(KEY_SPACE)
+	# DIK_C (option.ini KeySetting CLUTCH): the grab.
+	it.grab = Input.is_physical_key_pressed(KEY_C)
+	# DIK_X (KeySetting AVOID): the jump. DIK_LSHIFT: the shove (either Shift here).
+	it.jump = Input.is_physical_key_pressed(KEY_X)
+	it.shove = Input.is_physical_key_pressed(KEY_SHIFT)
 	# DIK_1 to DIK_4, or the keypad.
 	for k in 4:
 		if Input.is_physical_key_pressed(KEY_1 + k) or Input.is_physical_key_pressed(KEY_KP_1 + k):
@@ -1784,6 +1809,9 @@ func _touch_intent(m: Mech) -> MechSim.Intent:
 	var hold := w.is_continuous or w.is_charge() or int(w.mode_num("button_up_explosion")) == 1
 	it.fire = touch.fire_held(hold)
 	it.guard = touch.guard
+	it.grab = touch.grab
+	it.jump = touch.jump
+	it.shove = touch.shove
 	it.weapon_key = touch.weapon_key
 	var d := touch.plane_aim()
 	if d == Vector2.ZERO:
@@ -1917,7 +1945,7 @@ func _step_beams(dt: float) -> void:
 		for victim: Mech in _mechs_in_slot_order():
 			if victim.id == beam.shooter_id or victim.sim.life <= 0 or victim.sim.is_pulse() or Room.teammates(victim.team, beam_team):
 				continue
-			if not Combat.line_hits(beam.start, beam.line_end(), victim.sim.pos, victim.sim.crash_radius):
+			if not Combat.line_hits(beam.start, beam.line_end(), victim.sim.pos, victim.sim.crash_radius, victim.sim.height()):
 				continue
 			if beam.pierce():
 				if not beam.register_contact(victim.id, dt):
@@ -2417,6 +2445,275 @@ func _link(b: Bullet, at: Vector2, hit: Mech) -> void:
 	link.set_meta("shooter", shooter_id)
 	bullets.append(link)
 
+# --- Step 18: the grab (clutch) and the special attacks -----------------------------------
+# The grabber's machine finds who its dash meets (update_clutch_check) and asks the host,
+# which keeps one lock per held mech, as the server's is_clutch did, and tells everyone. The
+# grabber's machine then runs the combo and sends its hits; the held one's machine moves and
+# frees its own mech. Remote screens draw both from their state updates.
+
+## The grab's hits in hit reports: they come from no weapon (send_damage index 100).
+const GRAB_HIT := -100
+const GRAB_SWORD_HIT := "res://assets/original/x/weapon/sword_hit.gltf"
+const GRAB_EFFECTS := {
+	6: "res://assets/original/x/weapon/bitflash_eff.gltf",
+	7: "res://assets/original/x/weapon/japki_drian.gltf",
+}
+const GRAB_FINISH_ZEID := "res://assets/original/x/weapon/japki_attack.gltf"
+const GRAB_FINISH_AHEAD := 60.0
+## dxcamera.cpp sa_ani: three moves, each from the gameplay view toward the mech plus an offset
+## at a height, at a speed, held, then back when its time is up. [offset, height, speed, time]
+const SA_CAMERA := [[Vector2(50, 0), 40.0, 1000.0, 0.8], [Vector2(-70, 0), 21.0, 600.0, 0.8], [Vector2(0, -50), 50.0, 600.0, 1.6]]
+
+## Host (or practice): held mech id -> grabber id.
+var _grab_locks: Dictionary = {}
+## This machine's grabbers: id -> the ids already asked about this dash (once each).
+var _grab_asked: Dictionary = {}
+## This machine's held mechs: id -> the grabber's id.
+var _held_by: Dictionary = {}
+## The special's camera, running for the grabber: seconds in, or -1.
+var _sa_time := -1.0
+
+## The grab's sim signals, for a mech this machine runs.
+func _connect_grab(m: Mech) -> void:
+	m.sim.grab_dashed.connect(func() -> void:
+		if m.local:
+			sound.play("sound/clutch_start"))
+	m.sim.grab_combo_started.connect(func(id: int) -> void:
+		_show_grab_combo(m, id)
+		if _networked():
+			_net_grab_combo.rpc(id))
+	m.sim.grab_kick.connect(func(final: bool) -> void:
+		_show_grab_kick(m, m.sim.grab_combo, final)
+		if _networked():
+			_net_grab_kick.rpc(m.sim.grab_combo, final))
+	m.sim.grab_combo_done.connect(func(id: int) -> void:
+		_grab_throw(m, id, m.sim.facing)
+		if _networked():
+			_net_grab_throw.rpc(id, m.sim.facing))
+	m.sim.grab_window_out.connect(func() -> void:
+		_grab_let_go(m)
+		if _networked():
+			_net_grab_let_go.rpc())
+	m.sim.grab_release.connect(func() -> void: _grab_release_ask(m))
+
+## Every physics tick, for the mechs this machine runs: the dash's catch test, and a held
+## mech whose grabber is gone or down, or which is down itself, lets go.
+func _step_grabs() -> void:
+	for m: Mech in mechs.values():
+		if not _owns(m):
+			continue
+		if m.sim.grab == MechSim.Grab.DASH:
+			_grab_check(m)
+		else:
+			_grab_asked.erase(m.id)
+		if _held_by.has(m.id):
+			var a: Mech = mechs.get(_held_by[m.id])
+			if m.sim.life <= 0 or a == null or a.sim.life <= 0:
+				m.sim.grab_free()
+				_grab_release_ask(m)
+
+## update_clutch_check: anyone within 24 units and the cone ahead, not a teammate, not down,
+## not intangible or frozen. Each is asked about once a dash; there is no nearest pick.
+func _grab_check(m: Mech) -> void:
+	var asked: Array = _grab_asked.get(m.id, [])
+	var ahead := Original.vec2_from_deg(m.sim.facing)
+	for o: Mech in mechs.values():
+		if o == m or asked.has(o.id) or o.sim.is_dead_complete or o.sim.life <= 0 or o.sim.is_pulse() \
+				or o.sim.is_nodamage() or Room.teammates(o.team, m.team):
+			continue
+		var d := o.sim.pos - m.sim.pos
+		# Measured in 3D, so a mech in the air is out of reach.
+		var dh := o.sim.height() - m.sim.height()
+		if d.length_squared() + dh * dh >= MechSim.GRAB_REACH * MechSim.GRAB_REACH:
+			continue
+		if d.length_squared() > 0.0001 and ahead.dot(d.normalized()) <= MechSim.GRAB_CONE_COS:
+			continue
+		asked.append(o.id)
+		_grab_asked[m.id] = asked
+		if _networked() and mode != "host":
+			_net_grab_ask.rpc_id(1, o.id)
+		else:
+			_grab_decide(m.id, o.id)
+
+@rpc("any_peer", "call_remote", "reliable")
+func _net_grab_ask(victim: int) -> void:
+	if mode == "host":
+		_grab_decide(multiplayer.get_remote_sender_id(), victim)
+
+## The host's call (RG_CLUTCH_REQ): yes unless the target is already held or gone.
+func _grab_decide(grabber: int, victim: int) -> void:
+	var ok := not _grab_locks.has(victim) and mechs.has(victim) and not (mechs[victim] as Mech).sim.is_dead_complete
+	if ok:
+		_grab_locks[victim] = grabber
+	_grab_answer(grabber, victim, ok)
+	if _networked():
+		_net_grab_answer.rpc(grabber, victim, ok)
+
+@rpc("authority", "call_remote", "reliable")
+func _net_grab_answer(grabber: int, victim: int, ok: bool) -> void:
+	_grab_answer(grabber, victim, ok)
+
+## RG_CLUTCH_ACK on every machine: the catch sound at the one held; each side's own machine
+## starts its part.
+func _grab_answer(grabber: int, victim: int, ok: bool) -> void:
+	if not mechs.has(grabber) or not mechs.has(victim):
+		return
+	var a: Mech = mechs[grabber]
+	var v: Mech = mechs[victim]
+	if not ok:
+		if _owns(a):
+			a.sim.grab_refused()
+		return
+	a.sim.grab_target = victim
+	v.sim.grab_target = grabber
+	# clutch_action and clutched_action: crash_with_other off on every machine.
+	a.sim.bump_off = MechSim.BUMP_GRAB_GAP
+	v.sim.bump_off = MechSim.BUMP_GRAB_GAP
+	sound.play_at("sound/clutch_success", v.sim.pos)
+	if _owns(a):
+		a.sim.grab_caught(victim)
+	if _owns(v):
+		v.sim.grab_held(grabber, a.sim.pos, a.sim.facing)
+		_held_by[victim] = grabber
+		if v.id == DUMMY_ID:
+			_npc_shove(v)
+
+@rpc("any_peer", "call_remote", "reliable")
+func _net_grab_combo(id: int) -> void:
+	var a: Mech = mechs.get(multiplayer.get_remote_sender_id())
+	if a:
+		_show_grab_combo(a, id)
+
+## A combo begins: its sound and effect at the one held (clutch_throw for the throws, the
+## spark's and the drain's own). A special: sa.ogg at the grabber, the screen flash for the
+## two of them, and the grabber's camera move.
+func _show_grab_combo(a: Mech, id: int) -> void:
+	var v: Mech = mechs.get(a.sim.grab_target)
+	var at := v.sim.pos if v else a.sim.pos
+	match id:
+		1, 2, 3, 4:
+			sound.play_at("sound/clutch_throw", at)
+		6:
+			sound.play_at("sound/clutch_spark", at)
+		7:
+			sound.play_at("sound/drain", at)
+	if GRAB_EFFECTS.has(id) and ResourceLoader.exists(GRAB_EFFECTS[id]):
+		BattleWorld.spawn_effect(self, GRAB_EFFECTS[id], BattleWorld.effect_basis(1.0), at, Bodies.grab_clip_time(a.body, "spark") + 0.1)
+	if id == 5 or id > 8:
+		sound.play_at("sound/common/sa", a.sim.pos)
+		if a.id == local_id or (v and v.id == local_id):
+			hud.sp_flash()
+		if a.id == local_id:
+			_sa_time = 0.0
+
+@rpc("any_peer", "call_remote", "reliable")
+func _net_grab_kick(id: int, final: bool) -> void:
+	var a: Mech = mechs.get(multiplayer.get_remote_sender_id())
+	if a:
+		_show_grab_kick(a, id, final)
+
+## A special's hit: sword_hit.x and blade_Hit at the one held, the damage on its machine; the
+## last hit sounds finish.ogg, and Zeid's leaves japki_attack.x 60 units ahead.
+func _show_grab_kick(a: Mech, id: int, final: bool) -> void:
+	var v: Mech = mechs.get(a.sim.grab_target)
+	if v == null:
+		return
+	BattleWorld.spawn_effect(self, GRAB_SWORD_HIT, BattleWorld.facing_effect_basis(randi() % 360), v.sim.pos, 0.5)
+	sound.play_at("sound/finish" if final else "sound/blade_Hit", v.sim.pos)
+	if final and id == 5 and ResourceLoader.exists(GRAB_FINISH_ZEID):
+		BattleWorld.spawn_effect(self, GRAB_FINISH_ZEID, BattleWorld.effect_basis(1.0), a.sim.pos + Original.vec2_from_deg(a.sim.facing) * GRAB_FINISH_AHEAD, 1.0)
+	if _owns(v):
+		_special_hit(v, a.id, int(Bodies.grab_combo(id).get("damage", 0)), GRAB_HIT)
+
+@rpc("any_peer", "call_remote", "reliable")
+func _net_grab_throw(id: int, grabber_facing: int) -> void:
+	var a: Mech = mechs.get(multiplayer.get_remote_sender_id())
+	if a:
+		_grab_throw(a, id, grabber_facing)
+
+## The combo's end on the held one's machine: the damage (a special's came with its hits),
+## the push and the stun.
+func _grab_throw(a: Mech, id: int, grabber_facing: int) -> void:
+	var v: Mech = mechs.get(a.sim.grab_target)
+	if v == null or not _owns(v):
+		return
+	var c := Bodies.grab_combo(id)
+	if not (id == 5 or id > 8):
+		_special_hit(v, a.id, int(c.get("damage", 0)), GRAB_HIT)
+	if v.sim.life > 0:
+		v.sim.grab_thrown(MechSim.grab_push(id, grabber_facing), float(c.get("rigidity_time", 0.0)))
+
+@rpc("any_peer", "call_remote", "reliable")
+func _net_grab_let_go() -> void:
+	var a: Mech = mechs.get(multiplayer.get_remote_sender_id())
+	if a:
+		_grab_let_go(a)
+
+## No combo in time (RG_CLUTCH_COMBORESULT 0): the held one's machine frees it.
+func _grab_let_go(a: Mech) -> void:
+	var v: Mech = mechs.get(a.sim.grab_target)
+	if v and _owns(v) and v.sim.is_grabbed():
+		v.sim.grab_free()
+		_grab_release_ask(v)
+
+## RG_CLUTCH_RELEASE_REQ from the held one's machine; the host lifts the lock and tells all.
+func _grab_release_ask(v: Mech) -> void:
+	_held_by.erase(v.id)
+	if _networked() and mode != "host":
+		_net_grab_release_ask.rpc_id(1)
+	else:
+		_grab_release(v.id)
+
+@rpc("any_peer", "call_remote", "reliable")
+func _net_grab_release_ask() -> void:
+	if mode == "host":
+		_grab_release(multiplayer.get_remote_sender_id())
+
+func _grab_release(victim: int) -> void:
+	_grab_locks.erase(victim)
+	_grab_released(victim)
+	if _networked():
+		_net_grab_released.rpc(victim)
+
+@rpc("authority", "call_remote", "reliable")
+func _net_grab_released(victim: int) -> void:
+	_grab_released(victim)
+
+## RG_CLUTCH_RELEASE_ACK: the held one is free on its own machine.
+func _grab_released(victim: int) -> void:
+	var v: Mech = mechs.get(victim)
+	if v and _owns(v):
+		v.sim.grab_free()
+
+## The host lifts every lock a mech had, held or holding (it left, or the round is over).
+func _grab_forget(id: int) -> void:
+	_grab_locks.erase(id)
+	for held in _grab_locks.keys():
+		if _grab_locks[held] == id:
+			_grab_locks.erase(held)
+			_grab_released(held)
+			if _networked():
+				_net_grab_released.rpc(held)
+	_held_by.erase(id)
+	_grab_asked.erase(id)
+
+## sa_ani, after the gameplay camera has been placed this frame.
+func _update_sa_camera(me: Mech, dt: float) -> void:
+	if _sa_time < 0.0 or me == null:
+		return
+	_sa_time += dt
+	var start := 0.0
+	for key: Array in SA_CAMERA:
+		var span: float = key[3]
+		if _sa_time < start + span:
+			var t := _sa_time - start
+			var target := Original.to_godot(me.sim.pos + (key[0] as Vector2)) + Vector3(0, key[1], 0)
+			camera.position = camera.position.move_toward(target, float(key[2]) * t)
+			camera.look_at(Original.to_godot(me.sim.pos), Vector3.UP)
+			return
+		start += span
+	_sa_time = -1.0
+
 ## An X-Mine looking for a target from where it lies.
 func _mine_target(owner_id: int, at: Vector2, detect_range: float) -> MechSim:
 	var players := []
@@ -2444,7 +2741,7 @@ func _explode(b: Bullet, at: Vector2, direct: Mech = null) -> void:
 	for m: Mech in mechs.values():
 		if m.sim.life <= 0 or m.sim.is_pulse():
 			continue
-		var d := m.sim.pos.distance_to(at)
+		var d := m.sim.lifted(m.sim.pos.distance_to(at))
 		if d <= radius:
 			in_radius += 1
 		var amount := 0
@@ -2536,10 +2833,10 @@ func _step_bullets(dt: float) -> void:
 			var mate := not own and Room.teammates(m.team, shooter_team)
 			if mate and not b.linked:
 				# A teammate's shot through a mech carrying a leech bomb defuses it.
-				if _owns(m) and _leeches.has(m.id) and b.hits(m.sim.pos, m.sim.crash_radius):
+				if _owns(m) and _leeches.has(m.id) and b.hits(m.sim.pos, m.sim.crash_radius, m.sim.height()):
 					_leech_release(m, false)
 				continue
-			if not b.hits(m.sim.pos, m.sim.crash_radius):
+			if not b.hits(m.sim.pos, m.sim.crash_radius, m.sim.height()):
 				continue
 			alive = false
 			if b.weapon.is_splash():
@@ -2591,7 +2888,7 @@ func _record_hit(victim_id: int, attacker_id: int, amount: int, remaining: int, 
 	var victim: Mech = mechs[victim_id]
 	victim.sim.life = remaining
 	if _netlog:
-		print("  hit %d -> %d: %d with %s, %d left" % [attacker_id, victim_id, amount, GameData.weapon(weapon_id).name, remaining])
+		print("  hit %d -> %d: %d with %s, %d left" % [attacker_id, victim_id, amount, GameData.weapon(weapon_id).name if weapon_id > 0 else "Grab", remaining])
 	# Hitting a teammate (splash) earns no points; the kill still counts (kill_user_num).
 	if stats.has(attacker_id) and not Room.teammates(victim.team, _team_of_id(attacker_id)):
 		(stats[attacker_id] as Stats).damage += amount
@@ -2599,6 +2896,9 @@ func _record_hit(victim_id: int, attacker_id: int, amount: int, remaining: int, 
 		victim.view.play_damage()
 	elif stats.has(attacker_id) and attacker_id != victim_id:
 		(stats[attacker_id] as Stats).kills += 1
+	# The grab's hits have no weapon: no hit sound or mark of their own (the grab plays its).
+	if weapon_id <= 0:
+		return
 	# myplayer_is_damaged: the EMP blanks your radar for jamming_time, any hit, even 0.
 	var jamming := GameData.weapon(weapon_id).mode_num("jamming_time")
 	if victim_id == local_id and jamming > 0.0:
@@ -2626,6 +2926,91 @@ func _record_hit(victim_id: int, attacker_id: int, amount: int, remaining: int, 
 	elif attacker_id == local_id:
 		BattleWorld.font_marker(self, me.sim.pos + Vector2(0, 100), true)
 		hud.show_target(Bodies.face(victim.body), float(maxi(0, remaining)) / float(victim.sim.life_max), _mech_name(victim))
+
+# --- Step 19: the jump and the shove -------------------------------------------------------
+# Each is an event the owner's machine sends to the others (RGSERVER_MOVE_REQ 77, RG_SHOVE_REQ
+# and RG_SHOVE_ACK). Every machine shows the hop and the shove; each pushes only the mechs it
+# runs, from where it sees the shover.
+
+const SHOVE_BURST := "res://assets/original/x/weapon/character_twing.gltf"
+const SHOVE_BURST_LIFE := 1.5
+
+func _connect_jump_shove(m: Mech) -> void:
+	m.sim.jumped.connect(func() -> void:
+		if _netlog:
+			print("  jump by %d" % m.id)
+		if _networked():
+			_net_jump.rpc())
+	m.sim.shoved.connect(func() -> void:
+		_shove(m)
+		if _networked():
+			_net_shove.rpc())
+
+## pt_recv_ymove: the sender's hop, run here on its own clock.
+@rpc("any_peer", "call_remote", "reliable")
+func _net_jump() -> void:
+	var m: Mech = mechs.get(multiplayer.get_remote_sender_id())
+	if m:
+		m.sim.start_jump()
+		if _netlog:
+			print("  jump by %d seen" % m.id)
+
+@rpc("any_peer", "call_remote", "reliable")
+func _net_shove() -> void:
+	var m: Mech = mechs.get(multiplayer.get_remote_sender_id())
+	if m:
+		_shove(m)
+
+## World::receive_shove: the shover's clip, its burst 0.2 s in, and every mech this machine
+## runs within reach dashed away from it. No team test: teammates are pushed too.
+func _shove(s: Mech) -> void:
+	s.view.play_shove()
+	get_tree().create_timer(MechSim.SHOVE_BURST_DELAY).timeout.connect(func() -> void:
+		if is_instance_valid(s.view) and mechs.has(s.id):
+			_shove_burst(s))
+	for p: Mech in mechs.values():
+		if p == s or not _owns(p) or p.sim.is_dead_complete:
+			continue
+		var push := MechSim.shove_push(s.body, s.sim.pos, s.sim.height(), p.sim.pos, p.sim.height())
+		if push != Vector2.ZERO:
+			p.sim.start_dash(p.sim.pos + push)
+	if _netlog:
+		print("  shove by %d" % s.id)
+
+func _shove_burst(s: Mech) -> void:
+	BattleWorld.spawn_effect(self, SHOVE_BURST, BattleWorld.effect_basis(1.0), s.sim.pos, SHOVE_BURST_LIFE)
+
+## rcNPC::pt_send_npc_shove, sent when a computer player is caught (pt_recv_clutch_catch): no
+## recharge test, and World::receive_npc_shove adds a burst at once as well as the usual one.
+func _npc_shove(s: Mech) -> void:
+	_shove_burst(s)
+	_shove(s)
+
+# --- Step 20: bumping ----------------------------------------------------------------------
+
+var _bump_clock := 0.0
+
+## World::update_crash_check, 30 times a second, for this machine's player only (computer
+## players were not bumped): each overlapping mech dashes it 15 units away. Not with a mech
+## down or intangible, nor while either is in a grab's dash, catch, hold or combo (the other's
+## grab state is not checked for a computer player, the practice dummy here), nor within 2 s
+## of a catch. No team test.
+func _step_bumps(dt: float) -> void:
+	_bump_clock += dt
+	if _bump_clock < 1.0 / MechSim.BUMP_RATE:
+		return
+	_bump_clock = fmod(_bump_clock, 1.0 / MechSim.BUMP_RATE)
+	for me: Mech in mechs.values():
+		if not me.local or me.sim.is_dead_complete or me.sim.is_pulse() or me.sim.bump_off > 0.0 or me.sim.bump_held_by_grab():
+			continue
+		for o: Mech in mechs.values():
+			if o == me or o.sim.is_dead_complete or o.sim.is_pulse() or o.sim.bump_off > 0.0:
+				continue
+			if o.id != DUMMY_ID and o.sim.bump_held_by_grab():
+				continue
+			var push := MechSim.bump_push(me.sim.pos, me.sim.crash_radius, me.sim.height(), o.sim.pos, o.sim.crash_radius, o.sim.height())
+			if push != Vector2.ZERO:
+				me.sim.start_dash(me.sim.pos + push)
 
 # --- Camera -----------------------------------------------------------------------------
 
@@ -2703,6 +3088,49 @@ func _combo_keys(it: MechSim.Intent, facing: int, t: float) -> void:
 	elif t >= 0.31 and t < 0.34:
 		it.set(fwd, true)
 
+## Test option "autograb=N": walk up to the nearest enemy, grab it and enter grab combo N (the
+## body's special needs life at a tenth: add hp= to start low).
+var _autograb := _arg_int("autograb=")
+var _grab_feed := 0
+func _autograb_intent(m: Mech, enemy: Mech) -> MechSim.Intent:
+	var it := MechSim.Intent.new()
+	it.aim = enemy.sim.pos
+	# A special needs a tenth of life or less: the test driver starts there.
+	if (_autograb == 5 or _autograb > 8) and m.sim.life > m.sim.life_max / 10:
+		m.sim.life = m.sim.life_max / 10
+	if m.sim.grab == MechSim.Grab.CATCH:
+		# One key of the combo every other frame, as presses and releases.
+		var keys: Array = Bodies.grab_combo(_autograb).get("key", [])
+		var i := _grab_feed / 2
+		if _grab_feed % 2 == 0 and i < keys.size():
+			match str(keys[i]).trim_prefix("COMBO_KEY_"):
+				"LEFT":
+					it.left = true
+				"RIGHT":
+					it.right = true
+				"UP":
+					it.up = true
+				"DOWN":
+					it.down = true
+				"LCLICK":
+					it.fire = true
+				"RCLICK":
+					it.boost = true
+		_grab_feed += 1
+		return it
+	_grab_feed = 0
+	if m.sim.grab != MechSim.Grab.NONE:
+		return it
+	var to := enemy.sim.pos - m.sim.pos
+	if to.length() > 40.0:
+		it.right = to.x > 10.0
+		it.left = to.x < -10.0
+		it.up = to.y > 10.0
+		it.down = to.y < -10.0
+	elif Original.vec2_from_deg(m.sim.facing).dot(to.normalized()) > 0.9:
+		it.grab = fmod(_clock, 0.4) < 0.2
+	return it
+
 var _stuck_check := 0.0
 var _stuck_from := Vector2.ZERO
 var _unstick_time := 0.0
@@ -2710,6 +3138,8 @@ func _autopilot_intent(m: Mech) -> MechSim.Intent:
 	_clock += get_physics_process_delta_time()
 	var it := MechSim.Intent.new()
 	var enemy := _nearest_enemy(m)
+	if _autograb > 0 and enemy:
+		return _autograb_intent(m, enemy)
 	if enemy == null:
 		var t := fmod(_clock, 6.0)
 		it.aim = m.sim.pos + Vector2(100, 0)
@@ -2782,4 +3212,8 @@ func _autopilot_intent(m: Mech) -> MechSim.Intent:
 		it.guard = want_guard != m.sim.guarding and fmod(_clock, 0.5) < 0.1
 		if m.sim.guarding:
 			it.fire = false
+	# Test option "autododge": hop as soon as it is ready, shove whoever comes within reach.
+	if _autododge:
+		it.jump = fmod(_clock, 0.4) < 0.2
+		it.shove = dist < MechSim.SHOVE_RANGE * 0.9 and fmod(_clock, 0.4) < 0.2
 	return it

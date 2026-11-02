@@ -56,6 +56,16 @@ func _init(body_name := "zeid", weapons: Array = []) -> void:
 		var guard_path := Bodies.scene_path(Bodies.GUARD[body][i])
 		if guard_path != "":
 			_import_clips(lib, guard_path, "guard%d_" % i)
+	# The shove and the guard crash: "etc_0" and "etc_1".
+	var etc_path := Bodies.scene_path(Bodies.ETC[body])
+	if etc_path != "":
+		_import_clips(lib, etc_path, "etc_")
+	# The grab's clips (Bodies.grab_clips), one per file: "g_<slot>_0".
+	var grabs := Bodies.grab_clips(body)
+	for slot in grabs:
+		var grab_path := Bodies.scene_path(str(grabs[slot]))
+		if grab_path != "":
+			_import_clips(lib, grab_path, "g_%s_" % slot)
 	player.add_animation_library("", lib)
 	player.playback_default_blend_time = 0.15
 
@@ -139,9 +149,10 @@ func _import_clips(lib: AnimationLibrary, path: String, prefix: String) -> void:
 		lib.add_animation(prefix + str(Bodies.clip_index(int(clip_name.trim_prefix("anim_")), count)), clip)
 	src.free()
 
-## Sets position and the original's facing transform.
-func place(plane_pos: Vector2, facing_deg: int) -> void:
-	position = Original.to_godot(plane_pos)
+## Sets position and the original's facing transform. height is the jump's pos.y: the original's
+## camera sits at y = -depth (View_Manager.cpp), so a hop carries the mech away from it.
+func place(plane_pos: Vector2, facing_deg: int, height := 0.0) -> void:
+	position = Original.to_godot(plane_pos) + Vector3(0, -height, 0)
 	model.transform = Transform3D(facing_basis(facing_deg), Vector3.ZERO)
 
 ## rotation table entry i: RotZ(90) * RotX(zAngle) * RotY(-i), in D3D row-vector order.
@@ -170,6 +181,15 @@ func set_weapon(slot: int, animate := true) -> void:
 		player.get_animation(_current).loop_mode = Animation.LOOP_NONE
 	else:
 		play_stand()
+
+## The grab's clip (MechSim.grab_clip): started again whenever its count moves on, so a hit
+## played twice in a row shows twice. The hold and the held pose loop.
+var _grab_serial := -1
+func play_grab(slot: String, serial: int) -> void:
+	if serial == _grab_serial:
+		return
+	_grab_serial = serial
+	_play("g_%s_0" % slot, slot in ["hold", "held"], true)
 
 func play_stand() -> void:
 	_play("w%d_%d" % [weapon_slot, Original.ANIM_STAND], true)
@@ -276,9 +296,13 @@ func play_damage() -> void:
 func play_death() -> void:
 	_play("damage0_0", false, true)
 
-## True while a hit reaction or the knockout pose is playing, so movement clips wait.
+## rcPlayer::shove: PLAYERANIM_ETC clip 0, blended in over 0.1 s, once.
+func play_shove() -> void:
+	_play_blend("etc_0", 0.1)
+
+## True while a hit reaction, the shove or the knockout pose is playing, so movement clips wait.
 func is_reacting() -> bool:
-	return _current.begins_with("damage") and player.is_playing()
+	return (_current.begins_with("damage") or _current.begins_with("etc")) and player.is_playing()
 
 ## A charge weapon's glow (charge_effect1-3 at its charge_effect_frame), swapped as the level
 ## rises with a change_charge_effect flash; -1 clears it.

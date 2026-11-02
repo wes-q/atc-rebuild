@@ -15,6 +15,9 @@ class Intent:
 	var fire := false ## left mouse button, held state; attacks start on the press
 	var weapon_key := 0 ## number key held this frame, 1 to 4, or 0
 	var guard := false ## Space, held state; the guard toggles on the press
+	var grab := false ## C, held state; the grab starts on the press
+	var jump := false ## X (option.ini AVOID), held state; the jump starts on the press
+	var shove := false ## Left Shift, held state; the shove goes on the press
 	var aim := Vector2.ZERO ## point under the mouse, on the plane
 
 	func move_dir() -> Vector2:
@@ -295,6 +298,7 @@ func take_damage(amount: int) -> bool:
 	return life <= 0
 
 func step(intent: Intent, dt: float) -> void:
+	_advance_jump(dt)
 	if _update_dead(dt):
 		return
 	previous_pos = pos
@@ -310,6 +314,9 @@ func step(intent: Intent, dt: float) -> void:
 		swapped.fire = intent.fire
 		swapped.weapon_key = intent.weapon_key
 		swapped.guard = intent.guard
+		swapped.grab = intent.grab
+		swapped.jump = intent.jump
+		swapped.shove = intent.shove
 		swapped.aim = intent.aim
 		intent = swapped
 	# StunState and FreezeState: every input is dropped, turning and firing included.
@@ -319,6 +326,9 @@ func step(intent: Intent, dt: float) -> void:
 		held.aim = pos + Original.vec2_from_deg(facing) * 100.0
 		intent = held
 	_update_states(dt)
+	# update_my_input: the shove and the jump are read before the grab's update.
+	_update_jump_shove(intent)
+	intent = _update_grab(intent, dt)
 	_update_booster_gauge(intent, dt)
 	_update_move(intent)
 	_update_rotation(intent, dt)
@@ -346,6 +356,9 @@ func _update_dead(dt: float) -> bool:
 		_last_vel = 0.0
 		if guarding:
 			guard_cancel()
+		# Knocked out mid-grab: the grab is over (the held one's machine lets it go).
+		if grab != Grab.NONE:
+			_grab_end()
 	if not is_dead_complete:
 		_dead_time -= dt
 		if _dead_time <= 0.0:
@@ -962,6 +975,432 @@ func move_clip() -> int:
 		return Original.MOVE_BOOSTER_FORWARD if acc_flag else Original.MOVE_FORWARD
 	return Original.MOVE_BOOSTER_BACK if acc_flag else Original.MOVE_BACK
 
+# --- Grab (clutch: rcClutch.cpp, rcPlayer.cpp update_clutch, rcManager.cpp update_clutch) ---
+# C starts a dash along the facing; the game finds the one caught and asks the host, which
+# answers for everyone (RG_CLUTCH_REQ / ACK). The grabber then has 1.5 s to enter a grab
+# combo (clutch_combo_parameter.lua) by its keys; one combo ends the grab. The one held can do
+# nothing; after the combo it is pushed and stunned, then frees itself (RG_CLUTCH_RELEASE).
+
+## clutch state: NONE, the dash (DASH), a miss's standing second (MISSED, CLUTCH_BASE), the miss
+## clip (FAIL, CATCH_FAIL2), holding (CATCH), held (HELD, CATCHED), the grabber's combo
+## (COMBO), the held one's stun after it (STUNNED, COMBORIGIDITY) and waiting to be let go
+## (WAIT, ACK_WAIT, which leaves the mech free to act).
+enum Grab { NONE, DASH, MISSED, FAIL, CATCH, HELD, COMBO, STUNNED, WAIT }
+const GRAB_DASH_RANGE := 90.0 ## clutch_dash_range, 300 x HAHA_SCALE_VAL
+const GRAB_DASH_SPEED := 2.8 ## clutch_speed: x the armour's move speed
+const GRAB_REACH := 24.0 ## collision_radius 80 x 0.3, centre to centre
+## collision_deg 40 halved, but cosf(20) is taken in radians: 0.408, a cone of +-65.9 degrees.
+const GRAB_CONE_COS := 0.408082061813
+const GRAB_WINDOW := 1.5 ## clutch_time: the grabber's time to enter a combo
+const GRAB_COOLDOWN := 5.0 ## clutch_recharging_time, from the last grab (and from the start)
+const GRAB_MISS_STAND := 1.0 ## clutch_reaction_time
+const GRAB_HOLD_OFFSET := 21.0 ## clutched_distance 70 x 0.3, in front of the grabber
+const GRAB_HELD_LIMIT := 4.0 ## auto_cancel_catched_time: the held one frees itself
+const GRAB_PUSH_SCALE := 0.3 ## force_dash_distance x HAHA_SCALE_VAL (param_catalog.cpp)
+const GRAB_KICK_COST := 500.0 ## each special hit and its end take this from the booster
+const GRAB_KEY_BUFFER := 50 ## the combo key buffer's slots
+## Grab combo keys, as clutch_combo_parameter.lua names them.
+enum GrabKey { LEFT, RIGHT, UP, DOWN, LCLICK, RCLICK, BOTH_CLICK }
+
+## The grab began: the dash (sound/clutch_start, on this machine only).
+signal grab_dashed
+## A combo was entered while holding (clutch_combo_action).
+signal grab_combo_started(id: int)
+## A special's hit lands (on_end_animation), or its last one (final).
+signal grab_kick(final: bool)
+## The combo has run its time: the damage, push and stun go to the one held.
+signal grab_combo_done(id: int)
+## No combo within the window: the one held is let go (RG_CLUTCH_COMBORESULT 0).
+signal grab_window_out
+## Held, this mech frees itself: its stun is over, or 4 s went by (RG_CLUTCH_RELEASE_REQ).
+signal grab_release
+
+var grab := Grab.NONE
+var grab_time := 0.0 ## seconds in the state
+var grab_recharge := 0.0 ## seconds since the last grab began
+var grab_target := 0 ## the mech held, or holding this one (set by the game)
+var grab_combo := 0
+## The clip the grab shows (a Bodies.GRAB_SLOTS name, "" for none) and a count that moves on
+## each time one starts, so a clip played twice restarts on every screen.
+var grab_clip := ""
+var grab_clip_serial := 0
+var _grab_dist := 0.0
+var _grab_keys: Array[int] = []
+var _grab_total := 0.0
+var _grab_kicks := -1
+var _grab_clip_left := 0.0
+var _grab_stun := 0.0
+var _grab_prev := [false, false, false, false, false, false, false] ## left right up down fire boost grab
+
+func is_grabbing() -> bool:
+	return grab in [Grab.DASH, Grab.CATCH, Grab.COMBO]
+
+func is_grabbed() -> bool:
+	return grab in [Grab.HELD, Grab.STUNNED]
+
+## is_my_player_controlable: every grab state but WAIT holds the mech still.
+func _grab_blocks() -> bool:
+	return grab != Grab.NONE and grab != Grab.WAIT
+
+func _set_grab_clip(slot: String) -> void:
+	grab_clip = slot
+	grab_clip_serial += 1
+
+## rcPlayerManager::update_clutch and rcPlayer::update_clutch, on the mech's own machine.
+## Returns the input left for the rest of the step (none while the grab holds the mech).
+func _update_grab(intent: Intent, dt: float) -> Intent:
+	grab_recharge += dt
+	grab_time += dt
+	var edges: Array[bool] = []
+	var now := [intent.left, intent.right, intent.up, intent.down, intent.fire, intent.boost, intent.grab]
+	for i in now.size():
+		edges.append(now[i] and not _grab_prev[i])
+	_grab_prev = now
+	match grab:
+		Grab.NONE, Grab.WAIT:
+			# A press of C, 5 s after the last grab, not mid-attack (from a guard is allowed).
+			if edges[6] and grab == Grab.NONE and grab_recharge >= GRAB_COOLDOWN and (not attacking or guarding) \
+					and not dashing and not combo_active:
+				_start_grab()
+			else:
+				return intent
+		Grab.DASH:
+			# clutch_dash: move_speed x 2.8 along the facing until 90 units, or a wall stops it.
+			if dashing or _grab_dist >= GRAB_DASH_RANGE:
+				_grab_miss()
+			else:
+				var step := move_speed * GRAB_DASH_SPEED * dt
+				pos += Original.vec2_from_deg(facing) * step
+				_grab_dist += step
+		Grab.MISSED:
+			if grab_time >= GRAB_MISS_STAND:
+				_grab_fail()
+		Grab.FAIL:
+			if grab_time >= Bodies.grab_clip_time(body, "fail"):
+				_grab_end()
+		Grab.CATCH:
+			if grab_clip == "catch" and grab_time >= Bodies.grab_clip_time(body, "catch"):
+				_set_grab_clip("hold")
+			_grab_input(edges)
+			if grab == Grab.CATCH and grab_time > GRAB_WINDOW:
+				# clutch_fail: CLUTCH_BASE, the second's stand, then the miss clip.
+				grab = Grab.MISSED
+				grab_time = 0.0
+				_set_grab_clip("hold")
+				grab_window_out.emit()
+		Grab.HELD:
+			if grab_time > GRAB_HELD_LIMIT:
+				grab = Grab.WAIT
+				grab_release.emit()
+		Grab.COMBO:
+			_update_grab_combo(dt)
+		Grab.STUNNED:
+			if grab_time >= _grab_stun:
+				grab = Grab.WAIT
+				_set_grab_clip("")
+				grab_release.emit()
+	if not _grab_blocks():
+		return intent
+	var held := Intent.new()
+	held.aim = pos + Original.vec2_from_deg(facing) * 100.0
+	return held
+
+func _start_grab() -> void:
+	grab = Grab.DASH
+	grab_time = 0.0
+	grab_recharge = 0.0
+	_grab_dist = 0.0
+	_grab_keys.clear()
+	grab_target = 0
+	if guarding:
+		guard_cancel()
+	# end_weapon_charge; the dash runs on its own speed, not the move.
+	_burst_left = 0
+	streaming = false
+	if charging:
+		charging = false
+		charge_level = -1
+		charge_changed.emit(-1)
+	_send_move(0, 0)
+	_set_grab_clip("dash")
+	grab_dashed.emit()
+
+## dash_fail: the dash met nobody. A second standing (CLUTCH_BASE), then the miss clip.
+func _grab_miss() -> void:
+	grab = Grab.MISSED
+	grab_time = 0.0
+	_set_grab_clip("hold")
+
+func _grab_fail() -> void:
+	grab = Grab.FAIL
+	grab_time = 0.0
+	_set_grab_clip("fail")
+
+func _grab_end() -> void:
+	grab = Grab.NONE
+	grab_time = 0.0
+	grab_target = 0
+	_set_grab_clip("")
+
+## The host said yes (RG_CLUTCH_ACK 1): clutch_action, the catch clip, then the hold.
+func grab_caught(target_id: int) -> void:
+	grab = Grab.CATCH
+	grab_time = 0.0
+	grab_target = target_id
+	_grab_keys.clear()
+	_send_move(0, 0)
+	_set_grab_clip("catch")
+
+## The host said no (the target was already held or gone): straight to the miss clip.
+func grab_refused() -> void:
+	if grab in [Grab.DASH, Grab.MISSED]:
+		_grab_fail()
+
+## clutched_action: stopped, drawn 21 units in front of the grabber, the held clip.
+func grab_held(grabber_id: int, grabber_pos: Vector2, grabber_facing: int) -> void:
+	grab = Grab.HELD
+	grab_time = 0.0
+	grab_target = grabber_id
+	_burst_left = 0
+	streaming = false
+	if guarding:
+		guard_cancel()
+	start_dash(grabber_pos + Original.vec2_from_deg(grabber_facing) * GRAB_HOLD_OFFSET)
+	_set_grab_clip("held")
+
+## clutch_comboed_action: the push and the stun (rigidity_time), then the release.
+func grab_thrown(push: Vector2, stun: float) -> void:
+	grab = Grab.STUNNED
+	grab_time = 0.0
+	_grab_stun = stun
+	if push.length_squared() > 0.0:
+		start_dash(pos + push)
+
+## RG_CLUTCH_RELEASE_ACK: the held one is free.
+func grab_free() -> void:
+	if grab in [Grab.HELD, Grab.STUNNED, Grab.WAIT]:
+		_grab_end()
+
+## CrcClutch::update: one direction (left before right before up before down) and one click a
+## frame into the buffer; then the first combo whose keys end the buffer wins. Directions are
+## the screen's, not the facing's. A special needs life at a tenth or less.
+func _grab_input(edges: Array[bool]) -> void:
+	for i in 4:
+		if edges[i]:
+			_grab_push_key([GrabKey.LEFT, GrabKey.RIGHT, GrabKey.UP, GrabKey.DOWN][i])
+			break
+	if edges[4] and edges[5]:
+		_grab_push_key(GrabKey.BOTH_CLICK)
+	elif edges[4]:
+		_grab_push_key(GrabKey.LCLICK)
+	elif edges[5]:
+		_grab_push_key(GrabKey.RCLICK)
+
+func _grab_push_key(key: int) -> void:
+	_grab_keys.append(key)
+	if _grab_keys.size() > GRAB_KEY_BUFFER:
+		_grab_keys.remove_at(0)
+	var id := grab_match(_grab_keys, body, life, life_max)
+	if id > 0:
+		_start_grab_combo(id)
+
+## The first combo, by id, whose keys end the buffer; 0 if none, or if the first one that
+## matches is not this body's to use (rcManager.cpp: no fall back to another).
+static func grab_match(keys: Array[int], body_name: String, hp: int, hp_max: int) -> int:
+	for id in range(1, 13):
+		var c := Bodies.grab_combo(id)
+		var want: Array = c.get("key", [])
+		if want.is_empty() or want.size() > keys.size():
+			continue
+		var ok := true
+		for j in want.size():
+			if GrabKey.get(str(want[j]).trim_prefix("COMBO_KEY_"), -1) != keys[keys.size() - want.size() + j]:
+				ok = false
+				break
+		if not ok:
+			continue
+		return id if grab_combo_allowed(id, body_name, hp, hp_max) else 0
+	return 0
+
+## Each body keeps its own special (Zeid 5, Red Kite 9, Gigas 10, Deff 11, Alicia 12) and
+## the shared combos; a special only at a tenth of life or less (release builds).
+static func grab_combo_allowed(id: int, body_name: String, hp: int, hp_max: int) -> bool:
+	var own := {"zeid": 5, "redkite": 9, "gigas": 10, "deff": 11, "alicia": 12}
+	var special := id == 5 or id > 8
+	if special and own.get(body_name, -1) != id:
+		return false
+	return not special or hp <= hp_max * 0.1
+
+## clutch_combo_action: the throw (FORCEOUT, or FORCEOUT2 when the throw is behind), the
+## spark (SHOCK, which the drain also plays) or the special (CRASH, then the hits). The drain
+## gives its apdrain to the grabber at once.
+func _start_grab_combo(id: int) -> void:
+	var c := Bodies.grab_combo(id)
+	grab = Grab.COMBO
+	grab_combo = id
+	grab_time = 0.0
+	_grab_kicks = -1
+	var dir := Original.vec2_from_deg(facing)
+	match int(c.get("animation", 0)):
+		0:
+			var back := (id == 1 and dir.x < 0.0) or (id == 2 and dir.y < 0.0) or (id == 3 and dir.x > 0.0) or (id == 4 and dir.y > 0.0)
+			_set_grab_clip("throw_back" if back else "throw")
+			_grab_total = Bodies.grab_clip_time(body, grab_clip) - 0.15
+		1:
+			_set_grab_clip("crash")
+			_grab_total = Bodies.grab_clip_time(body, "crash") * 7.0
+			_grab_kicks = 5
+			_grab_clip_left = Bodies.grab_clip_time(body, "crash")
+		_:
+			_set_grab_clip("spark")
+			_grab_total = Bodies.grab_clip_time(body, "spark") + 0.15
+	var drain := int(c.get("apdrain", 0))
+	if drain > 0:
+		life = mini(life_max, life + drain)
+	grab_combo_started.emit(id)
+
+## The special's hits: each time a clip ends the next plays (CRASH, CRASH, KICK, KICK, KICK2),
+## with a hit and 500 off the booster; when the time is up, the last hit and 500 more.
+func _update_grab_combo(dt: float) -> void:
+	if _grab_kicks > 0:
+		_grab_clip_left -= dt
+		if _grab_clip_left <= 0.0:
+			_grab_kicks -= 1
+			var slot := "kick2" if _grab_kicks == 0 else ("kick" if _grab_kicks <= 2 else "crash")
+			_set_grab_clip(slot)
+			_grab_clip_left = Bodies.grab_clip_time(body, slot)
+			booster_gage = maxf(0.0, booster_gage - GRAB_KICK_COST)
+			grab_kick.emit(false)
+	if grab_time < _grab_total:
+		return
+	var id := grab_combo
+	if _grab_kicks >= 0:
+		_grab_kicks = -1
+		booster_gage = maxf(0.0, booster_gage - GRAB_KICK_COST)
+		grab_kick.emit(true)
+	# The throw goes to the one held before the grab lets go of who that was.
+	grab_combo_done.emit(id)
+	_grab_end()
+
+## clutch_comboed_action's push: combos 1 to 4 along the screen's axes, the rest along the
+## grabber's facing, force_dash_distance x 0.3.
+static func grab_push(id: int, grabber_facing: int) -> Vector2:
+	var dist := float(Bodies.grab_combo(id).get("force_dash_distance", 0.0)) * GRAB_PUSH_SCALE
+	match id:
+		1:
+			return Vector2(dist, 0)
+		2:
+			return Vector2(0, dist)
+		3:
+			return Vector2(-dist, 0)
+		4:
+			return Vector2(0, -dist)
+	return Original.vec2_from_deg(grabber_facing) * dist
+
+# --- Jump and shove (rcPlayer.cpp set_ymove and shove, rcManager.cpp update_my_input and
+# updateshove, world.cpp receive_shove) --------------------------------------------------------
+# X hops the mech straight up and down (ymove): pos.y = sin(pi t) x 200 for a second, and every
+# hit test measures from the mech's centre at that height to attacks on the ground, so most of
+# the hop is out of reach. Left Shift shoves: everyone within reach of the shover is dashed
+# straight away from it; the game applies that on each machine to the mechs it runs.
+
+const JUMP_TIME := 1.0 ## y_time > 1 ends the hop
+const JUMP_HEIGHT := 200.0 ## sinf(PI * y_time) * 200, not scaled by HAHA_SCALE_VAL
+const JUMP_RECHARGE := 5.0 ## ymove_recharge_time: ready at 4.999, full from the start
+## player_parameter.lua, the same for every body: range_to_apply_shoving 300 and the recharge.
+const SHOVE_RANGE := 300.0 * Original.SCALE
+const SHOVE_RECHARGE := 20.0 ## shove_recharging_time, full from the start (rcPlayer::init)
+const SHOVE_BURST_DELAY := 0.2 ## shove_start_time: character_twing.X goes off this long in
+## shoved_distance by the shover's body, x HAHA_SCALE_VAL (player_param_set).
+const SHOVE_DISTANCE := {"zeid": 400.0 * Original.SCALE, "redkite": 450.0 * Original.SCALE,
+	"gigas": 500.0 * Original.SCALE, "deff": 450.0 * Original.SCALE, "alicia": 450.0 * Original.SCALE}
+
+## X went down with the hop recharged and no grab holding the mech (RGSERVER_MOVE_REQ 77).
+signal jumped
+## Left Shift went down with the shove recharged (RG_SHOVE_REQ).
+signal shoved
+
+## Seconds into the hop, or -1 when on the ground.
+var jump_time := -1.0
+var jump_recharge := JUMP_RECHARGE
+var shove_recharge := SHOVE_RECHARGE
+var _prev_jump := false
+var _prev_shove := false
+
+## The mech's height off the plane.
+func height() -> float:
+	return sin(PI * jump_time) * JUMP_HEIGHT if jump_time >= 0.0 else 0.0
+
+## A plane distance to the mech's centre measured from the ground, as the original's 3D hit
+## tests do (the attack's y is 0, the mech's is its height).
+func lifted(plane_dist: float) -> float:
+	var h := height()
+	return sqrt(plane_dist * plane_dist + h * h) if h > 0.0 else plane_dist
+
+## set_ymove: a hop already under way is not restarted.
+func start_jump() -> void:
+	if jump_time < 0.0:
+		jump_time = 0.0
+
+## rcPlayer::update: the hop and both recharges, on every machine and while down too.
+func _advance_jump(dt: float) -> void:
+	bump_off = maxf(0.0, bump_off - dt)
+	jump_recharge = minf(JUMP_RECHARGE, jump_recharge + dt)
+	shove_recharge = minf(SHOVE_RECHARGE, shove_recharge + dt)
+	if jump_time >= 0.0:
+		jump_time += dt
+		if jump_time > JUMP_TIME:
+			jump_time = -1.0
+
+## updateshove has no grab test, so a held mech can shove; the hop is barred while grabbing
+## or held (the CATCH and CATCHED test, and is_my_player_controlable).
+func _update_jump_shove(intent: Intent) -> void:
+	var jump_down := intent.jump and not _prev_jump
+	var shove_down := intent.shove and not _prev_shove
+	_prev_jump = intent.jump
+	_prev_shove = intent.shove
+	if shove_down and shove_recharge >= SHOVE_RECHARGE:
+		shove_recharge = 0.0
+		shoved.emit()
+	if jump_down and not _grab_blocks() and jump_recharge >= JUMP_RECHARGE - 0.001:
+		jump_recharge = 0.0
+		start_jump()
+		jumped.emit()
+
+## The push a shove gives a mech: away from the shover by its body's distance, if the two
+## centres (heights included) are within reach; zero otherwise or when they coincide.
+static func shove_push(shover_body: String, shover_pos: Vector2, shover_height: float, at: Vector2, at_height: float) -> Vector2:
+	var d := at - shover_pos
+	var dh := at_height - shover_height
+	if sqrt(d.length_squared() + dh * dh) > SHOVE_RANGE or d.length_squared() < 0.0001:
+		return Vector2.ZERO
+	return d.normalized() * float(SHOVE_DISTANCE.get(shover_body, SHOVE_DISTANCE["zeid"]))
+
+# --- Bumping (world.cpp World::update_crash_check, rcPlayer.cpp crash_with_other) -----------
+# 30 times a second each machine checks its own player's mech against every other mech: if
+# their collision circles overlap (centres measured with heights), its own mech dashes 15 units
+# straight away. The other mech's machine does the same for it.
+
+const BUMP_RATE := 30.0 ## update_crash_gap.SetFramePerSec(30)
+const BUMP_PUSH := 15.0 ## default_dist, not scaled
+const BUMP_GRAB_GAP := 2.0 ## crash_gap: no bumping this long after a catch, on both mechs
+
+## crash_with_other is off until this runs out (clutch_action and clutched_action set it).
+var bump_off := 0.0
+
+## Grab states that take a mech out of bumping (DASH, CATCH, CATCHED, COMBO).
+func bump_held_by_grab() -> bool:
+	return grab in [Grab.DASH, Grab.CATCH, Grab.HELD, Grab.COMBO]
+
+## The push for a mech at pos (radius r, height h) overlapping another: BUMP_PUSH straight away
+## from it, or zero when apart or exactly on top of each other.
+static func bump_push(pos: Vector2, r: float, h: float, other_pos: Vector2, other_r: float, other_h: float) -> Vector2:
+	var d := pos - other_pos
+	var dh := h - other_h
+	if sqrt(d.length_squared() + dh * dh) >= r + other_r or d.length_squared() < 0.0001:
+		return Vector2.ZERO
+	return d.normalized() * BUMP_PUSH
+
 # --- Network -----------------------------------------------------------------------------
 # Each player moves their own mech and broadcasts its state, like the original client did
 # with its move protocol. Remote copies only display that state.
@@ -974,7 +1413,7 @@ var _has_snapshot := false
 func snapshot() -> Array:
 	return [pos.x, pos.y, facing, move_dir.x, move_dir.y, _last_vel, int(acc_flag),
 		speed_state, int(attacking), life, booster_gage, int(is_dead_complete), weapon_index,
-		charge_level if charging else -1, int(guarding)]
+		charge_level if charging else -1, int(guarding), int(grab), Bodies.GRAB_SLOTS.find(grab_clip), grab_clip_serial]
 
 ## Applies an owner's snapshot to a remote copy.
 func apply_snapshot(s: Array) -> void:
@@ -1003,6 +1442,12 @@ func apply_snapshot(s: Array) -> void:
 	if s.size() > 14 and (int(s[14]) != 0) != guarding:
 		guarding = int(s[14]) != 0
 		guard_changed.emit(guarding)
+	# The grab's state and clip, for drawing the owner's grab on this screen.
+	if s.size() > 17:
+		grab = int(s[15]) as Grab
+		var clip := int(s[16])
+		grab_clip = Bodies.GRAB_SLOTS[clip] if clip >= 0 and clip < Bodies.GRAB_SLOTS.size() else ""
+		grab_clip_serial = int(s[17])
 	if not _has_snapshot:
 		pos = real_pos
 		_has_snapshot = true
@@ -1010,6 +1455,7 @@ func apply_snapshot(s: Array) -> void:
 ## rcPlayer::update for remote players: carry the reported position forward at the reported
 ## velocity, then ease the drawn position 10% of the way toward it each tick.
 func step_remote(dt: float) -> void:
+	_advance_jump(dt)
 	_update_states(dt)
 	real_pos += move_dir * _last_vel * dt
 	pos += (real_pos - pos) * 0.1
@@ -1062,6 +1508,20 @@ func reset_at(spawn: Vector2, face: int) -> void:
 	power_reduce = 1.0
 	pull_velocity = Vector2.ZERO
 	over_boost_time = 0.0
+	grab = Grab.NONE
+	grab_time = 0.0
+	grab_recharge = 0.0
+	grab_target = 0
+	grab_combo = 0
+	grab_clip = ""
+	_grab_keys.clear()
+	_grab_kicks = -1
+	jump_time = -1.0
+	bump_off = 0.0
+	jump_recharge = JUMP_RECHARGE
+	shove_recharge = SHOVE_RECHARGE
+	_prev_jump = false
+	_prev_shove = false
 	_prev_fire = false
 	_prev_weapon_key = 0
 	_booster_input = BoosterInput.NOTHING
