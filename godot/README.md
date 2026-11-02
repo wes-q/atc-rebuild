@@ -763,6 +763,21 @@ Left Shift (`DIK_LSHIFT`; either Shift here).
 Test option `autododge`: the autopilot hops whenever the jump is ready and shoves anyone within
 reach.
 
+## Bumping (Step 20, from `world.cpp` `update_crash_check`, `rcPlayer.cpp` `crash_with_other`)
+
+Mechs do not pass through each other. 30 times a second each machine checks its own player's
+mech against every other mech; where their collision circles overlap (`collision_area` x 0.3:
+13.5 for Zeid and Alicia, 15 for Red Kite, 16.5 for Deff, 18 for Gigas; centres measured with
+heights, so a mech in a hop is clear), its own mech dashes 15 units straight away (not scaled).
+That stops its walk and drops a boost, as any dash does; a held key walks on at once. The other
+mech's machine pushes it the same way, so both give.
+
+- **Not bumped:** a mech that is down or intangible (Void Pulse); a mech in a grab's dash,
+  catch, hold or combo (for a computer player, here the practice dummy, only the 2 s below
+  count); both mechs for 2 s after a catch (`crash_gap`). No team test.
+- **Who moves:** only players' own mechs. The original's computer players were never bumped,
+  so the practice dummy stands its ground and you slide off it.
+
 ## Particle effects (from `psys.cpp`, `billboard.cpp`, `engine.cpp`)
 
 A frame named `p<group>:<script>` in a model runs particle scripts from
@@ -810,8 +825,6 @@ parts added to the base stats.
 
 ## Known gaps
 
-- Mechs pass through each other. The original pushed overlapping mechs 15 units apart
-  (`World::update_crash_check`, `crash_with_other`), except during a grab.
 
 - The fight HUD's weapon icons stop at id 25, so weapons from the shop's later ranges show
   no icon in the weapon panel, as in the original.
