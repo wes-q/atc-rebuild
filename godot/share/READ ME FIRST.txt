@@ -36,6 +36,9 @@ CONTROLS
     Right click      boost (hold)
     1 2 3 4          weapon slots
     Space            raise or lower your guard
+    C                grab: dash ahead and catch whoever you meet
+    X                jump: a one-second hop most attacks pass under (every 5 s)
+    Shift            shove: knock everyone close by away (every 20 s)
     F                next lock-on target (missiles)
     Tab              everyone's health
     + / -            camera zoom
@@ -43,6 +46,18 @@ CONTROLS
     Esc              leave the battle
 
 Sword combos: tap a movement key toward the way you are facing, then click.
+
+While holding someone after a grab, you have 1.5 s to enter a grab combo:
+    a direction key, then left click            throw them that way
+    left, right, then right click               spark (70 damage)
+    right, right, left, left, then right click  drain (45 damage, you heal 30)
+Each mech also has its own special attack, only when you are at 10% health or less:
+    Zeid      right right left right left down right, then right click
+    Red Kite  right left right left down right right, then right click
+    Gigas     left down right left right left down right, then right click
+    Deff      right left down right left down right, then right click
+    Alicia    left down right left down right left, then right click
+Directions are the screen's (W A S D or the arrow keys), not your mech's facing.
 
 PLAYING TOGETHER
 ----------------
