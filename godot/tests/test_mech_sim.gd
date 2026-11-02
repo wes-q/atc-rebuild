@@ -71,6 +71,7 @@ func _init() -> void:
 	test_step17_shots()
 	test_grab()
 	test_jump_and_shove()
+	test_bumping()
 	print("\n%d passed, %d failed" % [passed, failures])
 	quit(1 if failures > 0 else 0)
 
@@ -1598,4 +1599,25 @@ func test_jump_and_shove() -> void:
 	check(MechSim.shove_push("zeid", Vector2.ZERO, 0.0, Vector2(0, -89), 0.0).is_equal_approx(Vector2(0, -120)), "Zeid's push is 120, out to 90 units")
 	check(MechSim.shove_push("zeid", Vector2.ZERO, 0.0, Vector2(91, 0), 0.0) == Vector2.ZERO, "nothing beyond 90 units")
 	check(MechSim.shove_push("zeid", Vector2.ZERO, 0.0, Vector2(30, 0), 150.0) == Vector2.ZERO, "nor a mech high in a hop")
+
+func test_bumping() -> void:
+	print("bumping (world.cpp update_crash_check)")
+	var z := MechSim.new("zeid", 1)
+	var g := MechSim.new("gigas", 1)
+	check(near(z.crash_radius + g.crash_radius, 31.5), "Zeid and Gigas touch at 13.5 + 18 = 31.5 units (collision_area x 0.3)")
+	check(MechSim.bump_push(Vector2(30, 0), z.crash_radius, 0.0, Vector2.ZERO, g.crash_radius, 0.0).is_equal_approx(Vector2(15, 0)), "overlapping: 15 units straight away")
+	check(MechSim.bump_push(Vector2(32, 0), z.crash_radius, 0.0, Vector2.ZERO, g.crash_radius, 0.0) == Vector2.ZERO, "apart: nothing")
+	check(MechSim.bump_push(Vector2(10, 0), z.crash_radius, 100.0, Vector2.ZERO, g.crash_radius, 0.0) == Vector2.ZERO, "one high in a hop: nothing")
+	check(MechSim.bump_push(Vector2.ZERO, z.crash_radius, 0.0, Vector2.ZERO, g.crash_radius, 0.0) == Vector2.ZERO, "exactly on top of each other: no direction, nothing")
+	z.reset_at(Vector2.ZERO, 0)
+	check(not z.bump_held_by_grab(), "free: bumps")
+	z.grab_caught(2)
+	check(z.bump_held_by_grab(), "holding someone: no bumping")
+	z.bump_off = MechSim.BUMP_GRAB_GAP
+	var idle := MechSim.Intent.new()
+	idle.aim = Vector2(1000, 0)
+	run(z, idle, 1.9)
+	check(z.bump_off > 0.0, "still off 1.9 s after a catch")
+	run(z, idle, 0.2)
+	check(z.bump_off == 0.0, "and back on after 2 s")
 

@@ -1344,6 +1344,7 @@ func start_jump() -> void:
 
 ## rcPlayer::update: the hop and both recharges, on every machine and while down too.
 func _advance_jump(dt: float) -> void:
+	bump_off = maxf(0.0, bump_off - dt)
 	jump_recharge = minf(JUMP_RECHARGE, jump_recharge + dt)
 	shove_recharge = minf(SHOVE_RECHARGE, shove_recharge + dt)
 	if jump_time >= 0.0:
@@ -1374,6 +1375,31 @@ static func shove_push(shover_body: String, shover_pos: Vector2, shover_height: 
 	if sqrt(d.length_squared() + dh * dh) > SHOVE_RANGE or d.length_squared() < 0.0001:
 		return Vector2.ZERO
 	return d.normalized() * float(SHOVE_DISTANCE.get(shover_body, SHOVE_DISTANCE["zeid"]))
+
+# --- Bumping (world.cpp World::update_crash_check, rcPlayer.cpp crash_with_other) -----------
+# 30 times a second each machine checks its own player's mech against every other mech: if
+# their collision circles overlap (centres measured with heights), its own mech dashes 15 units
+# straight away. The other mech's machine does the same for it.
+
+const BUMP_RATE := 30.0 ## update_crash_gap.SetFramePerSec(30)
+const BUMP_PUSH := 15.0 ## default_dist, not scaled
+const BUMP_GRAB_GAP := 2.0 ## crash_gap: no bumping this long after a catch, on both mechs
+
+## crash_with_other is off until this runs out (clutch_action and clutched_action set it).
+var bump_off := 0.0
+
+## Grab states that take a mech out of bumping (DASH, CATCH, CATCHED, COMBO).
+func bump_held_by_grab() -> bool:
+	return grab in [Grab.DASH, Grab.CATCH, Grab.HELD, Grab.COMBO]
+
+## The push for a mech at pos (radius r, height h) overlapping another: BUMP_PUSH straight away
+## from it, or zero when apart or exactly on top of each other.
+static func bump_push(pos: Vector2, r: float, h: float, other_pos: Vector2, other_r: float, other_h: float) -> Vector2:
+	var d := pos - other_pos
+	var dh := h - other_h
+	if sqrt(d.length_squared() + dh * dh) >= r + other_r or d.length_squared() < 0.0001:
+		return Vector2.ZERO
+	return d.normalized() * BUMP_PUSH
 
 # --- Network -----------------------------------------------------------------------------
 # Each player moves their own mech and broadcasts its state, like the original client did
@@ -1491,6 +1517,7 @@ func reset_at(spawn: Vector2, face: int) -> void:
 	_grab_keys.clear()
 	_grab_kicks = -1
 	jump_time = -1.0
+	bump_off = 0.0
 	jump_recharge = JUMP_RECHARGE
 	shove_recharge = SHOVE_RECHARGE
 	_prev_jump = false

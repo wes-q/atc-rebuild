@@ -1612,6 +1612,7 @@ func _physics_process(dt: float) -> void:
 		else:
 			m.sim.step_remote(dt)
 	_step_grabs()
+	_step_bumps(dt)
 	_step_bullets(dt)
 	_step_beams(dt)
 	_step_swings(dt)
@@ -2565,6 +2566,9 @@ func _grab_answer(grabber: int, victim: int, ok: bool) -> void:
 		return
 	a.sim.grab_target = victim
 	v.sim.grab_target = grabber
+	# clutch_action and clutched_action: crash_with_other off on every machine.
+	a.sim.bump_off = MechSim.BUMP_GRAB_GAP
+	v.sim.bump_off = MechSim.BUMP_GRAB_GAP
 	sound.play_at("sound/clutch_success", v.sim.pos)
 	if _owns(a):
 		a.sim.grab_caught(victim)
@@ -2981,6 +2985,32 @@ func _shove_burst(s: Mech) -> void:
 func _npc_shove(s: Mech) -> void:
 	_shove_burst(s)
 	_shove(s)
+
+# --- Step 20: bumping ----------------------------------------------------------------------
+
+var _bump_clock := 0.0
+
+## World::update_crash_check, 30 times a second, for this machine's player only (computer
+## players were not bumped): each overlapping mech dashes it 15 units away. Not with a mech
+## down or intangible, nor while either is in a grab's dash, catch, hold or combo (the other's
+## grab state is not checked for a computer player, the practice dummy here), nor within 2 s
+## of a catch. No team test.
+func _step_bumps(dt: float) -> void:
+	_bump_clock += dt
+	if _bump_clock < 1.0 / MechSim.BUMP_RATE:
+		return
+	_bump_clock = fmod(_bump_clock, 1.0 / MechSim.BUMP_RATE)
+	for me: Mech in mechs.values():
+		if not me.local or me.sim.is_dead_complete or me.sim.is_pulse() or me.sim.bump_off > 0.0 or me.sim.bump_held_by_grab():
+			continue
+		for o: Mech in mechs.values():
+			if o == me or o.sim.is_dead_complete or o.sim.is_pulse() or o.sim.bump_off > 0.0:
+				continue
+			if o.id != DUMMY_ID and o.sim.bump_held_by_grab():
+				continue
+			var push := MechSim.bump_push(me.sim.pos, me.sim.crash_radius, me.sim.height(), o.sim.pos, o.sim.crash_radius, o.sim.height())
+			if push != Vector2.ZERO:
+				me.sim.start_dash(me.sim.pos + push)
 
 # --- Camera -----------------------------------------------------------------------------
 
